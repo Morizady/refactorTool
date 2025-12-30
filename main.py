@@ -16,6 +16,821 @@ from call_chain_analyzer import CallChainAnalyzer
 from sql_mapper_analyzer import SQLMapperAnalyzer
 from ai_generator import AIGenerator
 
+class DeepCallChainAnalyzer:
+    """深度调用链分析器 - 增强版"""
+    
+    def __init__(self, project_root: str):
+        self.project_root = Path(project_root)
+        self.analyzed_methods = set()  # 避免循环分析
+        self.call_tree = {}
+        self.interface_implementations = {}  # 接口实现映射
+        self.class_hierarchy = {}  # 类继承关系
+        self._build_class_hierarchy()
+        
+    def _build_class_hierarchy(self):
+        """构建类继承关系和接口实现映射"""
+        print("🔍 构建类继承关系...")
+        
+        for root, dirs, files in os.walk(self.project_root):
+            for file in files:
+                if file.endswith('.java'):
+                    file_path = os.path.join(root, file)
+                    self._analyze_class_structure(file_path)
+    
+    def _analyze_class_structure(self, file_path: str):
+        """分析单个Java文件的类结构"""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            import re
+            
+            # 查找类定义和接口实现
+            class_pattern = r'(?:public\s+)?(?:abstract\s+)?class\s+(\w+)(?:\s+extends\s+(\w+))?(?:\s+implements\s+([^{]+))?'
+            interface_pattern = r'(?:public\s+)?interface\s+(\w+)(?:\s+extends\s+([^{]+))?'
+            
+            class_matches = re.finditer(class_pattern, content)
+            for match in class_matches:
+                class_name = match.group(1)
+                parent_class = match.group(2)
+                interfaces = match.group(3)
+                
+                self.class_hierarchy[class_name] = {
+                    'file': file_path,
+                    'parent': parent_class,
+                    'interfaces': []
+                }
+                
+                if interfaces:
+                    interface_list = [i.strip() for i in interfaces.split(',')]
+                    self.class_hierarchy[class_name]['interfaces'] = interface_list
+                    
+                    # 建立接口到实现类的映射
+                    for interface in interface_list:
+                        if interface not in self.interface_implementations:
+                            self.interface_implementations[interface] = []
+                        self.interface_implementations[interface].append({
+                            'class': class_name,
+                            'file': file_path
+                        })
+            
+            # 查找接口定义
+            interface_matches = re.finditer(interface_pattern, content)
+            for match in interface_matches:
+                interface_name = match.group(1)
+                parent_interfaces = match.group(2)
+                
+                if interface_name not in self.interface_implementations:
+                    self.interface_implementations[interface_name] = []
+                    
+        except Exception as e:
+            pass  # 忽略解析错误
+    
+    def analyze_method_calls(self, file_path: str, method_name: str, depth: int = 0, max_depth: int = 4) -> Dict:
+        """深度分析方法调用 - 增强版"""
+        if depth > max_depth:
+            return {"note": "达到最大深度限制"}
+        
+        method_key = f"{file_path}:{method_name}"
+        if method_key in self.analyzed_methods:
+            return {"note": "已分析过，避免循环引用"}
+        
+        self.analyzed_methods.add(method_key)
+        
+        try:
+            if not os.path.exists(file_path):
+                return {"error": f"文件不存在: {file_path}"}
+            
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # 查找方法定义并提取方法调用
+            method_calls = self._extract_method_calls_from_content(content, method_name)
+            
+            # 递归分析每个调用
+            detailed_calls = []
+            for call in method_calls:
+                call_detail = {
+                    "method": call["method"],
+                    "object": call.get("object", ""),
+                    "line": call.get("line", 0),
+                    "arguments": call.get("arguments", 0),
+                    "type": call.get("type", "instance")
+                }
+                
+                # 查找方法实现
+                implementations = self._find_method_implementations(call, file_path)
+                
+                if implementations:
+                    call_detail["implementations"] = []
+                    
+                    # 对每个实现进行递归分析
+                    for impl in implementations:
+                        impl_detail = {
+                            "file": impl["file"],
+                            "class": impl.get("class", ""),
+                            "type": impl.get("type", "concrete")
+                        }
+                        
+                        # 递归分析实现
+                        if impl["file"] and os.path.exists(impl["file"]):
+                            impl_detail["sub_calls"] = self.analyze_method_calls(
+                                impl["file"], call["method"], depth + 1, max_depth
+                            )
+                        
+                        call_detail["implementations"].append(impl_detail)
+                else:
+                    # 如果没找到实现，尝试原有的查找方式
+                    target_file = self._find_method_implementation_legacy(call, file_path)
+                    if target_file:
+                        call_detail["implementation"] = target_file
+                        call_detail["sub_calls"] = self.analyze_method_calls(
+                            target_file, call["method"], depth + 1, max_depth
+                        )
+                
+                detailed_calls.append(call_detail)
+            
+            return {
+                "file": file_path,
+                "method": method_name,
+                "calls": detailed_calls,
+                "depth": depth
+            }
+            
+        except Exception as e:
+            return {"error": f"分析失败: {str(e)}"}
+    
+    def _extract_method_calls_from_content(self, content: str, method_name: str) -> List[Dict]:
+        """从内容中提取方法调用 - 增强版"""
+        calls = []
+        lines = content.split('\n')
+        
+        # 查找方法定义
+        method_start = -1
+        method_end = -1
+        brace_count = 0
+        in_method = False
+        paren_count = 0
+        
+        for i, line in enumerate(lines):
+            # 更精确的方法定义匹配
+            if self._is_method_definition(line, method_name):
+                method_start = i
+                in_method = True
+                brace_count = 0
+                paren_count = 0
+            
+            if in_method:
+                # 计算大括号和小括号
+                brace_count += line.count('{') - line.count('}')
+                paren_count += line.count('(') - line.count(')')
+                
+                # 提取方法调用
+                method_calls = self._parse_method_calls_in_line_enhanced(line, i + 1)
+                calls.extend(method_calls)
+                
+                # 如果大括号平衡且不在参数列表中，说明方法结束
+                if brace_count == 0 and paren_count == 0 and method_start != -1 and i > method_start:
+                    method_end = i
+                    break
+        
+        return calls
+    
+    def _is_method_definition(self, line: str, method_name: str) -> bool:
+        """判断是否是方法定义行"""
+        import re
+        
+        # 匹配方法定义模式
+        patterns = [
+            rf'(?:public|private|protected)?\s*(?:static)?\s*(?:\w+\s+)*{re.escape(method_name)}\s*\(',
+            rf'(?:public|private|protected)\s+(?:static\s+)?(?:\w+\s+)+{re.escape(method_name)}\s*\(',
+        ]
+        
+        for pattern in patterns:
+            if re.search(pattern, line):
+                return True
+        return False
+    
+    def _parse_method_calls_in_line_enhanced(self, line: str, line_number: int) -> List[Dict]:
+        """解析单行中的方法调用 - 增强版"""
+        calls = []
+        import re
+        
+        # 去除注释
+        line_clean = re.sub(r'//.*$', '', line)
+        line_clean = re.sub(r'/\*.*?\*/', '', line_clean)
+        
+        # 1. 链式调用 object.method1().method2()
+        chain_pattern = r'(\w+)(?:\.(\w+)\s*\([^)]*\))+(?:\.(\w+)\s*\([^)]*\))*'
+        chain_matches = re.finditer(chain_pattern, line_clean)
+        for match in chain_matches:
+            # 解析链式调用中的每个方法
+            chain_part = match.group(0)
+            method_calls_in_chain = re.findall(r'\.(\w+)\s*\(([^)]*)\)', chain_part)
+            
+            base_object = match.group(1)
+            for i, (method, args) in enumerate(method_calls_in_chain):
+                calls.append({
+                    "object": base_object if i == 0 else "chained",
+                    "method": method,
+                    "line": line_number,
+                    "arguments": self._count_arguments_from_string(args),
+                    "type": "chain"
+                })
+        
+        # 2. 静态方法调用 Class.method()
+        static_pattern = r'([A-Z]\w*)\.(\w+)\s*\(([^)]*)\)'
+        static_matches = re.finditer(static_pattern, line_clean)
+        for match in static_matches:
+            calls.append({
+                "object": match.group(1),
+                "method": match.group(2),
+                "line": line_number,
+                "arguments": self._count_arguments_from_string(match.group(3)),
+                "type": "static"
+            })
+        
+        # 3. 实例方法调用 object.method()
+        instance_pattern = r'(\w+)\.(\w+)\s*\(([^)]*)\)'
+        instance_matches = re.finditer(instance_pattern, line_clean)
+        for match in instance_matches:
+            # 避免重复添加已经在链式调用中处理的
+            if not any(call["object"] == match.group(1) and call["method"] == match.group(2) 
+                      and call["line"] == line_number for call in calls):
+                calls.append({
+                    "object": match.group(1),
+                    "method": match.group(2),
+                    "line": line_number,
+                    "arguments": self._count_arguments_from_string(match.group(3)),
+                    "type": "instance"
+                })
+        
+        # 4. 构造函数调用 new Class()
+        constructor_pattern = r'new\s+([A-Z]\w*)\s*\(([^)]*)\)'
+        constructor_matches = re.finditer(constructor_pattern, line_clean)
+        for match in constructor_matches:
+            calls.append({
+                "object": match.group(1),
+                "method": "<init>",
+                "line": line_number,
+                "arguments": self._count_arguments_from_string(match.group(2)),
+                "type": "constructor"
+            })
+        
+        # 5. 直接方法调用 method()
+        direct_pattern = r'(?<!\w)(\w+)\s*\(([^)]*)\)'
+        direct_matches = re.finditer(direct_pattern, line_clean)
+        for match in direct_matches:
+            method_name = match.group(1)
+            # 排除关键字、已匹配的方法和构造函数
+            if (method_name not in ['if', 'for', 'while', 'switch', 'catch', 'new', 'return'] and
+                not any(call["method"] == method_name and call["line"] == line_number for call in calls)):
+                calls.append({
+                    "method": method_name,
+                    "line": line_number,
+                    "arguments": self._count_arguments_from_string(match.group(2)),
+                    "type": "direct"
+                })
+        
+        return calls
+    
+    def _count_arguments_from_string(self, args_str: str) -> int:
+        """从参数字符串计算参数数量"""
+        if not args_str.strip():
+            return 0
+        
+        # 简单的参数计数，考虑嵌套括号
+        paren_level = 0
+        comma_count = 0
+        
+        for char in args_str:
+            if char == '(':
+                paren_level += 1
+            elif char == ')':
+                paren_level -= 1
+            elif char == ',' and paren_level == 0:
+                comma_count += 1
+        
+        return comma_count + 1 if args_str.strip() else 0
+    
+    def _find_method_implementations(self, call: Dict, current_file: str) -> List[Dict]:
+        """查找方法的所有实现 - 支持接口和继承"""
+        method_name = call["method"]
+        object_name = call.get("object", "")
+        call_type = call.get("type", "instance")
+        
+        implementations = []
+        
+        # 1. 处理已知的Java标准库
+        if self._is_java_standard_library(object_name):
+            implementations.append({
+                "file": None,
+                "class": object_name,
+                "type": "standard_library",
+                "note": f"Java标准库: {object_name}.{method_name}"
+            })
+            return implementations
+        
+        # 2. 查找项目中的实现
+        if object_name:
+            # 查找直接的类实现
+            class_file = self._find_file_by_name(f"{object_name}.java")
+            if class_file:
+                implementations.append({
+                    "file": class_file,
+                    "class": object_name,
+                    "type": "concrete"
+                })
+            
+            # 查找接口的所有实现
+            if object_name in self.interface_implementations:
+                for impl in self.interface_implementations[object_name]:
+                    implementations.append({
+                        "file": impl["file"],
+                        "class": impl["class"],
+                        "type": "interface_implementation"
+                    })
+            
+            # 查找继承关系中的实现
+            for class_name, info in self.class_hierarchy.items():
+                if info.get("parent") == object_name:
+                    implementations.append({
+                        "file": info["file"],
+                        "class": class_name,
+                        "type": "inheritance"
+                    })
+        
+        # 3. 在当前文件中查找本地方法
+        if call_type == "direct":
+            implementations.append({
+                "file": current_file,
+                "class": "current",
+                "type": "local"
+            })
+        
+        return implementations
+    
+    def _find_method_implementation_legacy(self, call: Dict, current_file: str) -> Optional[str]:
+        """原有的方法实现查找逻辑（向后兼容）"""
+        method_name = call["method"]
+        object_name = call.get("object", "")
+        
+        # 常见的Java工具类和方法映射
+        known_implementations = {
+            "System": {
+                "currentTimeMillis": None,  # Java标准库
+                "out": None
+            },
+            "JwtUtil": {
+                "createJWT": self._find_file_by_name("JwtUtil.java")
+            },
+            "Jwts": {
+                "builder": None,  # 第三方库
+                "parser": None
+            },
+            "SignatureAlgorithm": {
+                "HS256": None
+            },
+            "Date": {
+                "<init>": None
+            },
+            "HashMap": {
+                "<init>": None
+            }
+        }
+        
+        # 查找已知实现
+        if object_name in known_implementations:
+            impl = known_implementations[object_name].get(method_name)
+            if impl:
+                return impl
+        
+        # 在项目中查找实现
+        if object_name:
+            class_file = self._find_file_by_name(f"{object_name}.java")
+            if class_file:
+                return class_file
+        
+        return None
+    
+    def _is_java_standard_library(self, class_name: str) -> bool:
+        """判断是否是Java标准库类"""
+        standard_classes = {
+            'System', 'String', 'Integer', 'Long', 'Double', 'Float', 'Boolean',
+            'Date', 'Calendar', 'HashMap', 'ArrayList', 'List', 'Map', 'Set',
+            'Thread', 'Object', 'Class', 'Math', 'Random'
+        }
+        return class_name in standard_classes
+    
+    def _find_file_by_name(self, filename: str) -> Optional[str]:
+        """在项目中查找指定文件名的文件"""
+        for root, dirs, files in os.walk(self.project_root):
+            if filename in files:
+                return os.path.join(root, filename)
+        return None
+
+def generate_call_tree(endpoint_path: str, output_dir: str = "./migration_output"):
+    """生成指定接口的深度调用链树"""
+    analysis_file = f"{output_dir}/endpoint_analysis.json"
+    
+    if not os.path.exists(analysis_file):
+        print(f"❌ 分析文件不存在: {analysis_file}")
+        print("请先运行单项目分析生成分析数据：")
+        print("python main.py --single /path/to/project")
+        return
+    
+    # 加载分析数据
+    try:
+        with open(analysis_file, 'r', encoding='utf-8') as f:
+            analysis_data = json.load(f)
+    except Exception as e:
+        print(f"❌ 读取分析文件失败: {e}")
+        return
+    
+    # 查找匹配的接口
+    matching_endpoints = []
+    for endpoint_data in analysis_data:
+        endpoint = endpoint_data['endpoint']
+        if endpoint_path in endpoint['path'] or endpoint_path == endpoint['path']:
+            matching_endpoints.append(endpoint_data)
+    
+    if not matching_endpoints:
+        print(f"❌ 未找到匹配的接口: {endpoint_path}")
+        return
+    
+    # 选择接口
+    if len(matching_endpoints) > 1:
+        print(f"🔍 找到 {len(matching_endpoints)} 个匹配的接口:")
+        for i, endpoint_data in enumerate(matching_endpoints, 1):
+            endpoint = endpoint_data['endpoint']
+            print(f"{i}. {endpoint['method']} {endpoint['path']} - {endpoint['name']}")
+        
+        try:
+            choice = int(input("\n请选择要分析的接口 (输入序号): ")) - 1
+            if 0 <= choice < len(matching_endpoints):
+                selected_endpoint = matching_endpoints[choice]
+            else:
+                print("❌ 无效的选择")
+                return
+        except ValueError:
+            print("❌ 请输入有效的数字")
+            return
+    else:
+        selected_endpoint = matching_endpoints[0]
+    
+    # 生成调用树
+    _generate_call_tree_md(selected_endpoint, output_dir)
+
+def _generate_call_tree_md(endpoint_data: Dict, output_dir: str):
+    """生成调用树的Markdown文件"""
+    endpoint = endpoint_data['endpoint']
+    call_chain = endpoint_data['call_chain']
+    
+    # 确定项目根目录
+    file_path = endpoint['file_path']
+    project_root = None
+    
+    # 尝试找到项目根目录
+    path_parts = file_path.split(os.sep)
+    for i, part in enumerate(path_parts):
+        if part in ['src', 'main', 'java']:
+            project_root = os.sep.join(path_parts[:i-2]) if i >= 2 else os.sep.join(path_parts[:i])
+            break
+    
+    if not project_root:
+        project_root = os.path.dirname(file_path)
+    
+    print(f"🔍 开始深度分析接口: {endpoint['name']}")
+    print(f"📁 项目根目录: {project_root}")
+    
+    # 创建深度分析器
+    analyzer = DeepCallChainAnalyzer(project_root)
+    
+    # 分析主方法
+    main_analysis = analyzer.analyze_method_calls(
+        file_path, 
+        endpoint['handler'],
+        max_depth=4  # 增加深度
+    )
+    
+    # 生成Markdown内容
+    md_content = _build_call_tree_markdown(endpoint, call_chain, main_analysis)
+    
+    # 保存到文件
+    output_file = f"{output_dir}/call_tree_{endpoint['handler']}.md"
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write(md_content)
+    
+    print(f"✅ 调用树已生成: {output_file}")
+
+def _build_call_tree_markdown(endpoint: Dict, call_chain: Dict, deep_analysis: Dict) -> str:
+    """构建调用树的Markdown内容 - 增强版"""
+    lines = []
+    
+    # 标题
+    lines.append(f"# {endpoint['name']} 深度调用链分析")
+    lines.append("")
+    
+    # 基本信息
+    lines.append("## 接口基本信息")
+    lines.append("")
+    lines.append(f"- **接口名称**: {endpoint['name']}")
+    lines.append(f"- **请求路径**: {endpoint['method']} {endpoint['path']}")
+    lines.append(f"- **控制器**: {endpoint['controller']}")
+    lines.append(f"- **处理方法**: {endpoint['handler']}")
+    lines.append(f"- **源文件**: {endpoint['file_path']}")
+    lines.append(f"- **行号**: {endpoint['line_number']}")
+    lines.append("")
+    
+    # 浅层调用链（原有数据）
+    lines.append("## 浅层调用链")
+    lines.append("")
+    method_calls = call_chain.get('method_calls', [])
+    if method_calls:
+        lines.append("```")
+        for i, call in enumerate(method_calls, 1):
+            obj = call.get('object', '')
+            method = call.get('method', '')
+            args = call.get('arguments', 0)
+            line = call.get('position', 0)
+            if obj:
+                lines.append(f"{i:2d}. {obj}.{method}() - {args}个参数 (行:{line})")
+            else:
+                lines.append(f"{i:2d}. {method}() - {args}个参数 (行:{line})")
+        lines.append("```")
+    else:
+        lines.append("无方法调用")
+    lines.append("")
+    
+    # 深度调用树
+    lines.append("## 深度调用树")
+    lines.append("")
+    
+    if "error" in deep_analysis:
+        lines.append(f"❌ 分析失败: {deep_analysis['error']}")
+    else:
+        lines.append("```")
+        lines.append(f"📁 {endpoint['handler']}() - 主方法")
+        _build_tree_recursive_enhanced(deep_analysis.get('calls', []), lines, "  ")
+        lines.append("```")
+    
+    lines.append("")
+    
+    # 接口实现分析
+    lines.append("## 接口实现分析")
+    lines.append("")
+    _build_implementation_analysis(deep_analysis.get('calls', []), lines)
+    
+    # 调用链详细说明
+    lines.append("## 调用链详细说明")
+    lines.append("")
+    _build_detailed_explanation_enhanced(deep_analysis.get('calls', []), lines, 1)
+    
+    # 性能分析建议
+    lines.append("## 性能分析建议")
+    lines.append("")
+    total_calls = _count_total_calls_enhanced(deep_analysis.get('calls', []))
+    max_depth = _get_max_depth_enhanced(deep_analysis.get('calls', []))
+    
+    if total_calls > 30:
+        lines.append("⚠️ **高复杂度接口**: 调用链非常复杂，强烈建议重构")
+    elif total_calls > 20:
+        lines.append("⚡ **中高复杂度**: 调用链较深，建议考虑重构")
+    elif total_calls > 10:
+        lines.append("⚡ **中等复杂度**: 调用链适中，注意性能监控")
+    else:
+        lines.append("✅ **简单接口**: 调用链简洁，性能良好")
+    
+    lines.append(f"- 总调用数: {total_calls}")
+    lines.append(f"- 最大深度: {max_depth}")
+    lines.append(f"- 接口实现数: {_count_interface_implementations(deep_analysis.get('calls', []))}")
+    lines.append("")
+    
+    # 优化建议
+    lines.append("### 优化建议")
+    lines.append("")
+    lines.append("1. **减少不必要的方法调用**: 合并相似的操作")
+    lines.append("2. **缓存重复计算**: 对于重复的计算结果进行缓存")
+    lines.append("3. **异步处理**: 对于耗时操作考虑异步处理")
+    lines.append("4. **批量操作**: 减少数据库交互次数")
+    lines.append("5. **接口优化**: 考虑使用具体实现类而非接口调用")
+    lines.append("")
+    
+    return "\n".join(lines)
+
+def _build_tree_recursive_enhanced(calls: List[Dict], lines: List[str], indent: str):
+    """递归构建调用树 - 增强版"""
+    for call in calls:
+        method = call.get('method', 'unknown')
+        obj = call.get('object', '')
+        line_num = call.get('line', 0)
+        args = call.get('arguments', 0)
+        call_type = call.get('type', 'instance')
+        
+        # 构建调用显示
+        if obj:
+            call_display = f"{obj}.{method}()"
+        else:
+            call_display = f"{method}()"
+        
+        # 添加类型标识
+        type_marker = ""
+        if call_type == "static":
+            type_marker = " [静态]"
+        elif call_type == "constructor":
+            type_marker = " [构造]"
+        elif call_type == "chain":
+            type_marker = " [链式]"
+        
+        lines.append(f"{indent}├── {call_display}{type_marker} - {args}个参数 (行:{line_num})")
+        
+        # 处理多个实现
+        implementations = call.get('implementations', [])
+        if implementations:
+            for i, impl in enumerate(implementations):
+                impl_type = impl.get('type', 'concrete')
+                impl_class = impl.get('class', 'unknown')
+                
+                type_desc = {
+                    'concrete': '具体实现',
+                    'interface_implementation': '接口实现',
+                    'inheritance': '继承实现',
+                    'standard_library': 'Java标准库',
+                    'local': '本地方法'
+                }.get(impl_type, '未知类型')
+                
+                lines.append(f"{indent}  │ └── {impl_class} ({type_desc})")
+                
+                # 递归处理子调用
+                sub_calls = impl.get('sub_calls', {})
+                if isinstance(sub_calls, dict) and 'calls' in sub_calls:
+                    _build_tree_recursive_enhanced(sub_calls['calls'], lines, indent + "  │   ")
+                elif isinstance(sub_calls, dict) and 'note' in sub_calls:
+                    lines.append(f"{indent}  │     └── {sub_calls['note']}")
+        else:
+            # 处理单个实现（向后兼容）
+            sub_calls = call.get('sub_calls', {})
+            if isinstance(sub_calls, dict) and 'calls' in sub_calls:
+                _build_tree_recursive_enhanced(sub_calls['calls'], lines, indent + "  ")
+            elif isinstance(sub_calls, dict) and 'note' in sub_calls:
+                lines.append(f"{indent}  └── {sub_calls['note']}")
+
+def _build_implementation_analysis(calls: List[Dict], lines: List[str]):
+    """构建接口实现分析"""
+    interface_calls = []
+    concrete_calls = []
+    
+    def collect_implementations(call_list, depth=0):
+        for call in call_list:
+            implementations = call.get('implementations', [])
+            if implementations:
+                for impl in implementations:
+                    if impl.get('type') == 'interface_implementation':
+                        interface_calls.append({
+                            'method': call.get('method', 'unknown'),
+                            'object': call.get('object', ''),
+                            'implementation': impl,
+                            'depth': depth
+                        })
+                    elif impl.get('type') == 'concrete':
+                        concrete_calls.append({
+                            'method': call.get('method', 'unknown'),
+                            'object': call.get('object', ''),
+                            'implementation': impl,
+                            'depth': depth
+                        })
+                    
+                    # 递归收集
+                    sub_calls = impl.get('sub_calls', {})
+                    if isinstance(sub_calls, dict) and 'calls' in sub_calls:
+                        collect_implementations(sub_calls['calls'], depth + 1)
+    
+    collect_implementations(calls)
+    
+    if interface_calls:
+        lines.append("### 接口调用")
+        lines.append("")
+        for call in interface_calls[:5]:  # 最多显示5个
+            method = call['method']
+            obj = call['object']
+            impl_class = call['implementation'].get('class', 'unknown')
+            lines.append(f"- **{obj}.{method}()** → {impl_class} (深度: {call['depth']})")
+        
+        if len(interface_calls) > 5:
+            lines.append(f"- ... 还有 {len(interface_calls) - 5} 个接口调用")
+        lines.append("")
+    
+    if concrete_calls:
+        lines.append("### 具体类调用")
+        lines.append("")
+        for call in concrete_calls[:5]:  # 最多显示5个
+            method = call['method']
+            obj = call['object']
+            impl_class = call['implementation'].get('class', 'unknown')
+            lines.append(f"- **{obj}.{method}()** → {impl_class} (深度: {call['depth']})")
+        
+        if len(concrete_calls) > 5:
+            lines.append(f"- ... 还有 {len(concrete_calls) - 5} 个具体类调用")
+        lines.append("")
+
+def _build_detailed_explanation_enhanced(calls: List[Dict], lines: List[str], level: int):
+    """构建详细说明 - 增强版"""
+    for i, call in enumerate(calls, 1):
+        method = call.get('method', 'unknown')
+        obj = call.get('object', '')
+        call_type = call.get('type', 'instance')
+        
+        lines.append(f"### {level}.{i} {obj}.{method}() 调用" if obj else f"### {level}.{i} {method}() 调用")
+        lines.append("")
+        
+        lines.append(f"- **调用类型**: {call_type}")
+        lines.append(f"- **参数数量**: {call.get('arguments', 0)}")
+        lines.append(f"- **调用行号**: {call.get('line', 0)}")
+        
+        # 实现信息
+        implementations = call.get('implementations', [])
+        if implementations:
+            lines.append(f"- **实现数量**: {len(implementations)}")
+            lines.append("")
+            lines.append("**实现详情**:")
+            
+            for j, impl in enumerate(implementations, 1):
+                impl_type = impl.get('type', 'concrete')
+                impl_class = impl.get('class', 'unknown')
+                impl_file = impl.get('file', '')
+                
+                lines.append(f"  {j}. **{impl_class}** ({impl_type})")
+                if impl_file:
+                    lines.append(f"     - 文件: {impl_file}")
+                
+                # 子调用统计
+                sub_calls = impl.get('sub_calls', {})
+                if isinstance(sub_calls, dict) and 'calls' in sub_calls:
+                    sub_count = len(sub_calls['calls'])
+                    lines.append(f"     - 子调用: {sub_count} 个")
+        else:
+            # 向后兼容
+            impl = call.get('implementation', '')
+            if impl:
+                lines.append(f"- **实现位置**: {impl}")
+        
+        lines.append("")
+
+def _count_total_calls_enhanced(calls: List[Dict]) -> int:
+    """计算总调用数 - 增强版"""
+    total = len(calls)
+    for call in calls:
+        implementations = call.get('implementations', [])
+        if implementations:
+            for impl in implementations:
+                sub_calls = impl.get('sub_calls', {})
+                if isinstance(sub_calls, dict) and 'calls' in sub_calls:
+                    total += _count_total_calls_enhanced(sub_calls['calls'])
+        else:
+            # 向后兼容
+            sub_calls = call.get('sub_calls', {})
+            if isinstance(sub_calls, dict) and 'calls' in sub_calls:
+                total += _count_total_calls_enhanced(sub_calls['calls'])
+    return total
+
+def _get_max_depth_enhanced(calls: List[Dict], current_depth: int = 1) -> int:
+    """获取最大深度 - 增强版"""
+    max_depth = current_depth
+    for call in calls:
+        implementations = call.get('implementations', [])
+        if implementations:
+            for impl in implementations:
+                sub_calls = impl.get('sub_calls', {})
+                if isinstance(sub_calls, dict) and 'calls' in sub_calls:
+                    depth = _get_max_depth_enhanced(sub_calls['calls'], current_depth + 1)
+                    max_depth = max(max_depth, depth)
+        else:
+            # 向后兼容
+            sub_calls = call.get('sub_calls', {})
+            if isinstance(sub_calls, dict) and 'calls' in sub_calls:
+                depth = _get_max_depth_enhanced(sub_calls['calls'], current_depth + 1)
+                max_depth = max(max_depth, depth)
+    return max_depth
+
+def _count_interface_implementations(calls: List[Dict]) -> int:
+    """统计接口实现数量"""
+    count = 0
+    
+    def count_recursive(call_list):
+        nonlocal count
+        for call in call_list:
+            implementations = call.get('implementations', [])
+            for impl in implementations:
+                if impl.get('type') == 'interface_implementation':
+                    count += 1
+                
+                sub_calls = impl.get('sub_calls', {})
+                if isinstance(sub_calls, dict) and 'calls' in sub_calls:
+                    count_recursive(sub_calls['calls'])
+    
+    count_recursive(calls)
+    return count
+
 def show_endpoint_details(endpoint_path: str, output_dir: str = "./migration_output"):
     """显示特定接口的代码和调用链"""
     analysis_file = f"{output_dir}/endpoint_analysis.json"
@@ -670,11 +1485,12 @@ def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='新旧系统接口迁移工具')
     
-    # 创建互斥组：要么是迁移模式，要么是单项目模式，要么是接口查看模式
+    # 创建互斥组：要么是迁移模式，要么是单项目模式，要么是接口查看模式，要么是调用树生成模式
     mode_group = parser.add_mutually_exclusive_group(required=True)
     mode_group.add_argument('--migrate', action='store_true', help='迁移模式：分析新旧两个项目')
     mode_group.add_argument('--single', metavar='PROJECT_PATH', help='单项目模式：只分析一个项目')
     mode_group.add_argument('--show-endpoint', metavar='ENDPOINT_PATH', help='显示特定接口的代码和调用链，如：/admin/category/page')
+    mode_group.add_argument('--call-tree', metavar='ENDPOINT_PATH', help='生成特定接口的深度调用链树，如：/user/user/login')
     
     # 迁移模式参数
     parser.add_argument('--old', help='旧项目路径（迁移模式必需）')
@@ -714,9 +1530,13 @@ def main():
             analyze_only=True,  # 单项目模式默认只分析
             single_mode=True
         )
-    else:  # 接口查看模式
+    elif args.show_endpoint:  # 接口查看模式
         # 直接调用接口查看功能，不需要创建MigrationTool
         show_endpoint_details(args.show_endpoint, args.output)
+        return
+    else:  # 调用树生成模式
+        # 直接调用调用树生成功能
+        generate_call_tree(args.call_tree, args.output)
         return
     
     # 运行工具

@@ -36,7 +36,7 @@ class EndpointExtractor:
         self.patterns = {
             "spring": {
                 "controller": r'@(RestController|Controller)\s*.*?class\s+(\w+)',
-                "mapping": r'@(GetMapping|PostMapping|PutMapping|DeleteMapping|RequestMapping|PatchMapping)\s*\(\s*["\']([^"\']+)["\']',
+                "mapping": r'@(GetMapping|PostMapping|PutMapping|DeleteMapping|RequestMapping|PatchMapping)\s*\(\s*(?:value\s*=\s*)?["\']([^"\']+)["\']',
                 "method": r'(public|private|protected)\s+[^{]*?\s+(\w+)\s*\([^)]*\)'
             },
             "flask": {
@@ -113,7 +113,7 @@ class EndpointExtractor:
         
         # 查找所有@RequestMapping注解获取基础路径
         base_path = ""
-        base_matches = re.finditer(r'@RequestMapping\s*\(\s*["\']([^"\']+)["\']', content)
+        base_matches = re.finditer(r'@RequestMapping\s*\(\s*(?:value\s*=\s*)?["\']([^"\']+)["\']', content)
         for match in base_matches:
             base_path = match.group(1)
             break
@@ -121,29 +121,43 @@ class EndpointExtractor:
         # 提取各个方法映射
         lines = content.split('\n')
         
-        for i, line in enumerate(lines):
+        i = 0
+        while i < len(lines):
+            line = lines[i]
             line_number = i + 1
             
             # 查找方法映射注解
             mapping_match = re.search(self.patterns["spring"]["mapping"], line)
             if not mapping_match:
+                i += 1
                 continue
                 
             annotation = mapping_match.group(1)  # GetMapping, PostMapping等
             sub_path = mapping_match.group(2)
             
             # 确定HTTP方法
-            http_method = self._get_http_method_from_annotation(annotation)
+            http_method = self._get_http_method_from_annotation(annotation, line)
             
             # 查找方法定义（通常在接下来的几行）
             method_name = None
-            for j in range(i + 1, min(i + 10, len(lines))):
-                method_match = re.search(self.patterns["spring"]["method"], lines[j])
+            method_line_number = line_number
+            
+            # 向前查找方法定义，最多查找15行
+            for j in range(i + 1, min(i + 15, len(lines))):
+                current_line = lines[j].strip()
+                
+                # 跳过空行和注解行
+                if not current_line or current_line.startswith('@'):
+                    continue
+                
+                method_match = re.search(self.patterns["spring"]["method"], current_line)
                 if method_match:
                     method_name = method_match.group(2)
+                    method_line_number = j + 1
                     break
                     
             if not method_name:
+                i += 1
                 continue
                 
             # 构建完整路径
@@ -157,11 +171,12 @@ class EndpointExtractor:
                 controller=class_name,
                 handler=method_name,
                 file_path=str(file_path),
-                line_number=line_number,
+                line_number=method_line_number,
                 framework="spring"
             )
             
             endpoints.append(endpoint)
+            i += 1
             
         return endpoints
     
@@ -298,7 +313,7 @@ class EndpointExtractor:
         
         return endpoints
     
-    def _get_http_method_from_annotation(self, annotation: str) -> str:
+    def _get_http_method_from_annotation(self, annotation: str, line: str = "") -> str:
         """从Spring注解获取HTTP方法"""
         mapping = {
             "GetMapping": "GET",
@@ -306,9 +321,21 @@ class EndpointExtractor:
             "PutMapping": "PUT",
             "DeleteMapping": "DELETE",
             "PatchMapping": "PATCH",
-            "RequestMapping": "GET"  # 默认
         }
-        return mapping.get(annotation, "GET")
+        
+        if annotation in mapping:
+            return mapping[annotation]
+        
+        # 处理@RequestMapping的method参数
+        if annotation == "RequestMapping":
+            # 查找method参数
+            method_match = re.search(r'method\s*=\s*RequestMethod\.(\w+)', line)
+            if method_match:
+                return method_match.group(1).upper()
+            else:
+                return "GET"  # 默认GET方法
+        
+        return "GET"  # 默认
     
     def _normalize_path(self, base_path: str, sub_path: str) -> str:
         """规范化URL路径"""
