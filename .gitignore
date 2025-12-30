@@ -1,0 +1,5 @@
+*venv*
+*test_project*
+*pyc
+*__pycache__*
+*migration_output*

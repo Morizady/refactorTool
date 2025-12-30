@@ -1,0 +1,508 @@
+#!/usr/bin/env python3
+"""
+新旧系统接口映射与迁移工具 - 支持单项目分析
+"""
+
+import os
+import json
+from pathlib import Path
+from typing import Dict, List, Optional
+from dataclasses import dataclass, asdict
+import argparse
+
+from endpoint_extractor import EndpointExtractor
+from equivalence_matcher import EquivalenceMatcher
+from call_chain_analyzer import CallChainAnalyzer
+from sql_mapper_analyzer import SQLMapperAnalyzer
+from ai_generator import AIGenerator
+
+@dataclass
+class Config:
+    """配置类"""
+    old_project_path: Optional[str] = None
+    new_project_path: Optional[str] = None
+    single_project_path: Optional[str] = None  # 新增：单项目模式
+    output_dir: str = "./migration_output"
+    ai_model: str = "gpt-3.5-turbo"
+    api_key: Optional[str] = None
+    context_window: int = 4000
+    verbose: bool = False
+    analyze_only: bool = False  # 仅分析模式
+    single_mode: bool = False   # 新增：单项目模式标志
+
+class MigrationTool:
+    """迁移工具主类"""
+    
+    def __init__(self, config: Config):
+        self.config = config
+        self.endpoint_extractor = EndpointExtractor()
+        self.equivalence_matcher = EquivalenceMatcher()
+        self.call_chain_analyzer = CallChainAnalyzer()
+        self.sql_mapper_analyzer = SQLMapperAnalyzer()
+        
+        # 仅在配置了API密钥时初始化AI生成器
+        if not config.analyze_only and (config.api_key or os.getenv("OPENAI_API_KEY")):
+            self.ai_generator = AIGenerator(
+                model=config.ai_model,
+                api_key=config.api_key or os.getenv("OPENAI_API_KEY")
+            )
+        else:
+            self.ai_generator = None
+            if not config.single_mode:
+                print("⚠️  AI功能已禁用，仅执行分析")
+        
+        # 创建输出目录
+        os.makedirs(config.output_dir, exist_ok=True)
+        
+    def run(self):
+        """运行完整的迁移流程"""
+        if self.config.single_mode:
+            self.run_single_project_analysis()
+        else:
+            self.run_migration_analysis()
+    
+    def run_single_project_analysis(self):
+        """运行单项目分析"""
+        print("🚀 开始分析项目接口...")
+        
+        # 提取接口
+        print("📋 提取项目接口...")
+        endpoints = self.endpoint_extractor.extract_from_project(
+            self.config.single_project_path
+        )
+        
+        print(f"✅ 提取完成: 共找到 {len(endpoints)} 个接口")
+        
+        # 显示解析的接口结构
+        if self.config.verbose:
+            self.display_endpoints("项目接口结构", endpoints)
+        
+        # 分析每个接口的调用链
+        print("🔍 分析接口调用链和依赖...")
+        endpoint_analysis = []
+        
+        for i, (name, endpoint) in enumerate(endpoints.items(), 1):
+            print(f"  分析接口 {i}/{len(endpoints)}: {endpoint.name}")
+            
+            # 分析调用链
+            call_chain = self.call_chain_analyzer.analyze_call_chain(
+                endpoint, self.config.single_project_path
+            )
+            
+            # 分析SQL映射
+            sql_mappings = self.sql_mapper_analyzer.find_related_mappers(
+                call_chain, self.config.single_project_path
+            )
+            
+            analysis = {
+                "endpoint": endpoint,
+                "call_chain": call_chain,
+                "sql_mappings": sql_mappings,
+                "complexity_score": self._calculate_complexity_score(call_chain, sql_mappings)
+            }
+            
+            endpoint_analysis.append(analysis)
+        
+        # 显示分析结果
+        if self.config.verbose:
+            self.display_single_project_analysis(endpoint_analysis)
+        
+        # 保存结果
+        print("💾 保存分析结果...")
+        self.save_single_project_results(endpoints, endpoint_analysis)
+        
+        print(f"🎉 单项目分析完成! 结果已保存到: {self.config.output_dir}")
+    
+    def run_migration_analysis(self):
+        """运行迁移分析（原有逻辑）"""
+        print("🚀 开始分析新旧项目接口...")
+        
+        # 1. 提取接口
+        print("📋 步骤1: 提取旧项目接口...")
+        old_endpoints = self.endpoint_extractor.extract_from_project(
+            self.config.old_project_path
+        )
+        
+        print(f"📋 步骤2: 提取新项目接口...")
+        new_endpoints = self.endpoint_extractor.extract_from_project(
+            self.config.new_project_path
+        )
+        
+        print(f"✅ 提取完成: 旧接口 {len(old_endpoints)} 个, 新接口 {len(new_endpoints)} 个")
+        
+        # 显示解析的接口结构
+        if self.config.verbose:
+            self.display_endpoints("旧项目接口结构", old_endpoints)
+            self.display_endpoints("新项目接口结构", new_endpoints)
+        
+        # 2. 匹配等价接口
+        print("🔄 步骤3: 匹配等价接口...")
+        matched_pairs = self.equivalence_matcher.match_endpoints(
+            old_endpoints, new_endpoints
+        )
+        
+        print(f"✅ 匹配完成: 找到 {len(matched_pairs)} 对等价接口")
+        
+        # 显示匹配的接口对
+        if self.config.verbose and matched_pairs:
+            self.display_matched_pairs(matched_pairs)
+        
+        # 3. 分析调用链和SQL映射
+        print("🔍 步骤4: 分析调用链和依赖...")
+        migration_plan = self.analyze_migration_plan(matched_pairs)
+        
+        # 显示调用链信息
+        if self.config.verbose and migration_plan:
+            self.display_call_chains(migration_plan)
+        
+        # 4. 仅在启用AI功能时生成迁移代码
+        if self.ai_generator:
+            print("🤖 步骤5: 生成迁移代码...")
+            generated_code = self.generate_migration_code(migration_plan)
+        else:
+            generated_code = {}
+            print("⏭️  跳过代码生成步骤（未启用AI功能）")
+        
+        # 5. 保存结果
+        print("💾 步骤6: 保存结果...")
+        self.save_results(old_endpoints, new_endpoints, matched_pairs, generated_code)
+        
+        print(f"🎉 {'分析' if self.config.analyze_only else '迁移'}完成! 结果已保存到: {self.config.output_dir}")
+    
+    def display_endpoints(self, title: str, endpoints: Dict):
+        """显示解析的接口结构"""
+        print(f"\n=== {title} ===")
+        for i, (name, endpoint) in enumerate(endpoints.items(), 1):
+            print(f"{i}. {name}:")
+            print(f"  路径: {endpoint.path}")
+            print(f"  方法: {endpoint.method}")
+            print(f"  控制器: {endpoint.controller}")
+            print(f"  处理器: {endpoint.handler}")
+            print(f"  文件: {endpoint.file_path}")
+            print(f"  行号: {endpoint.line_number}")
+            print("-" * 40)
+    
+    def display_matched_pairs(self, matched_pairs: List):
+        """显示匹配的接口对"""
+        print("\n=== 等价接口匹配结果 ===")
+        for i, (old_ep, new_ep) in enumerate(matched_pairs, 1):
+            print(f"{i}. 匹配对:")
+            print(f"  旧接口: {old_ep.name} ({old_ep.method} {old_ep.path})")
+            print(f"  新接口: {new_ep.name} ({new_ep.method} {new_ep.path})")
+            print(f"  相似度: {getattr(old_ep, 'match_score', {}).get('total_score', 0):.2f}")
+            print("-" * 60)
+    
+    def display_single_project_analysis(self, endpoint_analysis: List[Dict]):
+        """显示单项目分析结果"""
+        print("\n=== 单项目接口分析结果 ===")
+        
+        # 统计信息
+        total_endpoints = len(endpoint_analysis)
+        complex_endpoints = sum(1 for analysis in endpoint_analysis if analysis["complexity_score"] > 5)
+        
+        print(f"总接口数: {total_endpoints}")
+        print(f"复杂接口数: {complex_endpoints}")
+        print(f"简单接口数: {total_endpoints - complex_endpoints}")
+        
+        # 按复杂度排序显示
+        sorted_analysis = sorted(endpoint_analysis, key=lambda x: x["complexity_score"], reverse=True)
+        
+        for i, analysis in enumerate(sorted_analysis, 1):
+            endpoint = analysis["endpoint"]
+            call_chain = analysis["call_chain"]
+            complexity = analysis["complexity_score"]
+            
+            print(f"\n{i}. 接口: {endpoint.name}")
+            print(f"   路径: {endpoint.method} {endpoint.path}")
+            print(f"   文件: {endpoint.file_path}:{endpoint.line_number}")
+            print(f"   复杂度: {complexity}")
+            
+            if call_chain.get("method_calls"):
+                print(f"   方法调用: {len(call_chain['method_calls'])} 个")
+                if self.config.verbose:
+                    for j, call in enumerate(call_chain["method_calls"][:3], 1):  # 只显示前3个
+                        print(f"     {j}. {call.get('object', '')}.{call.get('method', '')}()")
+            
+            if call_chain.get("sql_statements"):
+                print(f"   SQL语句: {len(call_chain['sql_statements'])} 个")
+            
+            if analysis.get("sql_mappings"):
+                print(f"   SQL映射: {len(analysis['sql_mappings'])} 个")
+            
+            print("-" * 60)
+    
+    def display_call_chains(self, migration_plan: List[Dict]):
+        """显示接口调用链信息"""
+        print("\n=== 接口调用链分析 ===")
+        for i, plan in enumerate(migration_plan, 1):
+            old_ep = plan["old_endpoint"]
+            print(f"{i}. 接口: {old_ep.name} ({old_ep.method} {old_ep.path})")
+            
+            call_chain = plan["call_chain"]
+            if call_chain.get("method_calls"):
+                print("  方法调用链:")
+                for j, call in enumerate(call_chain["method_calls"], 1):
+                    print(f"    {j}. {call.get('object', '')}.{call.get('method', '')}()")
+            
+            if call_chain.get("service_calls"):
+                print("  服务调用:")
+                for j, service in enumerate(call_chain["service_calls"], 1):
+                    print(f"    {j}. {service}")
+            
+            if call_chain.get("dao_calls"):
+                print("  DAO调用:")
+                for j, dao in enumerate(call_chain["dao_calls"], 1):
+                    print(f"    {j}. {dao}")
+            
+            if call_chain.get("sql_statements"):
+                print("  SQL语句:")
+                for j, sql in enumerate(call_chain["sql_statements"], 1):
+                    print(f"    {j}. {sql[:100]}...")  # 只显示前100个字符
+            
+            print("-" * 60)
+    
+    def _calculate_complexity_score(self, call_chain: Dict, sql_mappings: List) -> int:
+        """计算接口复杂度得分"""
+        score = 0
+        
+        # 方法调用数量
+        method_calls = len(call_chain.get("method_calls", []))
+        score += method_calls * 1
+        
+        # SQL语句数量
+        sql_statements = len(call_chain.get("sql_statements", []))
+        score += sql_statements * 2
+        
+        # SQL映射文件数量
+        score += len(sql_mappings) * 3
+        
+        # 相关文件数量
+        related_files = len(call_chain.get("files", []))
+        score += related_files * 1
+        
+        return score
+    
+    def analyze_migration_plan(self, matched_pairs: List) -> List[Dict]:
+        """分析迁移计划"""
+        migration_plan = []
+        
+        for old_endpoint, new_endpoint in matched_pairs:
+            # 分析调用链
+            call_chain = self.call_chain_analyzer.analyze_call_chain(
+                old_endpoint, self.config.old_project_path
+            )
+            
+            # 分析SQL映射
+            sql_mappings = self.sql_mapper_analyzer.find_related_mappers(
+                call_chain, self.config.old_project_path
+            )
+            
+            # 收集需要迁移的代码上下文
+            migration_context = self.collect_migration_context(
+                old_endpoint, call_chain, sql_mappings
+            )
+            
+            migration_plan.append({
+                "old_endpoint": old_endpoint,
+                "new_endpoint": new_endpoint,
+                "call_chain": call_chain,
+                "sql_mappings": sql_mappings,
+                "migration_context": migration_context,
+                "estimated_tokens": len(str(migration_context)) // 4  # 粗略估算
+            })
+            
+        return migration_plan
+    
+    def collect_migration_context(self, old_endpoint, call_chain, sql_mappings):
+        """收集迁移需要的代码上下文"""
+        context = {
+            "old_endpoint": old_endpoint.__dict__ if hasattr(old_endpoint, '__dict__') else old_endpoint,
+            "call_chain": call_chain,
+            "sql_mappings": sql_mappings,
+            "related_files": set()
+        }
+        
+        # 收集所有相关文件内容
+        project_root = Path(self.config.old_project_path)
+        
+        for file_info in call_chain.get("files", []):
+            file_path = project_root / file_info["path"]
+            if file_path.exists():
+                try:
+                    content = file_path.read_text(encoding='utf-8')
+                    context["related_files"].add({
+                        "path": str(file_path.relative_to(project_root)),
+                        "content": content[:5000]  # 限制大小
+                    })
+                except:
+                    continue
+        
+        return context
+    
+    def generate_migration_code(self, migration_plan: List[Dict]) -> Dict:
+        """生成迁移代码"""
+        generated_code = {}
+        
+        for i, plan in enumerate(migration_plan):
+            if plan["estimated_tokens"] > self.config.context_window:
+                print(f"⚠️  警告: 第{i+1}个接口上下文过大 ({plan['estimated_tokens']} tokens)，跳过生成")
+                continue
+                
+            print(f"🔄 生成第{i+1}/{len(migration_plan)}个接口迁移代码...")
+            
+            try:
+                generated = self.ai_generator.generate_migration_code(plan)
+                endpoint_name = plan["old_endpoint"].get("name", f"endpoint_{i}")
+                generated_code[endpoint_name] = generated
+            except Exception as e:
+                print(f"❌ 生成失败: {e}")
+                
+        return generated_code
+    
+    def save_single_project_results(self, endpoints: Dict, endpoint_analysis: List[Dict]):
+        """保存单项目分析结果"""
+        # 保存接口信息
+        with open(f"{self.config.output_dir}/endpoints.json", "w", encoding='utf-8') as f:
+            json.dump([e.__dict__ for e in endpoints.values()], f, indent=2, ensure_ascii=False)
+        
+        # 保存分析结果
+        analysis_data = []
+        for analysis in endpoint_analysis:
+            endpoint_dict = analysis["endpoint"].__dict__
+            analysis_dict = {
+                "endpoint": endpoint_dict,
+                "call_chain": analysis["call_chain"],
+                "sql_mappings": analysis["sql_mappings"],
+                "complexity_score": analysis["complexity_score"]
+            }
+            analysis_data.append(analysis_dict)
+        
+        with open(f"{self.config.output_dir}/endpoint_analysis.json", "w", encoding='utf-8') as f:
+            json.dump(analysis_data, f, indent=2, ensure_ascii=False)
+        
+        # 生成分析报告
+        self._generate_analysis_report(endpoints, endpoint_analysis)
+    
+    def _generate_analysis_report(self, endpoints: Dict, endpoint_analysis: List[Dict]):
+        """生成分析报告"""
+        report_lines = []
+        report_lines.append("# 项目接口分析报告\n")
+        
+        # 统计信息
+        total_endpoints = len(endpoint_analysis)
+        complex_endpoints = sum(1 for analysis in endpoint_analysis if analysis["complexity_score"] > 5)
+        frameworks = set(ep.framework for ep in endpoints.values())
+        
+        report_lines.append("## 统计概览\n")
+        report_lines.append(f"- 总接口数: {total_endpoints}")
+        report_lines.append(f"- 复杂接口数: {complex_endpoints}")
+        report_lines.append(f"- 简单接口数: {total_endpoints - complex_endpoints}")
+        report_lines.append(f"- 使用框架: {', '.join(frameworks)}")
+        report_lines.append("")
+        
+        # 接口列表
+        report_lines.append("## 接口详情\n")
+        sorted_analysis = sorted(endpoint_analysis, key=lambda x: x["complexity_score"], reverse=True)
+        
+        for i, analysis in enumerate(sorted_analysis, 1):
+            endpoint = analysis["endpoint"]
+            complexity = analysis["complexity_score"]
+            
+            report_lines.append(f"### {i}. {endpoint.name}")
+            report_lines.append(f"- **路径**: {endpoint.method} {endpoint.path}")
+            report_lines.append(f"- **文件**: {endpoint.file_path}:{endpoint.line_number}")
+            report_lines.append(f"- **复杂度**: {complexity}")
+            report_lines.append(f"- **框架**: {endpoint.framework}")
+            
+            call_chain = analysis["call_chain"]
+            if call_chain.get("method_calls"):
+                report_lines.append(f"- **方法调用**: {len(call_chain['method_calls'])} 个")
+            if call_chain.get("sql_statements"):
+                report_lines.append(f"- **SQL语句**: {len(call_chain['sql_statements'])} 个")
+            if analysis.get("sql_mappings"):
+                report_lines.append(f"- **SQL映射**: {len(analysis['sql_mappings'])} 个")
+            
+            report_lines.append("")
+        
+        # 保存报告
+        with open(f"{self.config.output_dir}/analysis_report.md", "w", encoding='utf-8') as f:
+            f.write("\n".join(report_lines))
+    
+    def save_results(self, *args):
+        """保存所有结果到文件"""
+        # 保存旧接口
+        with open(f"{self.config.output_dir}/old_endpoints.json", "w", encoding='utf-8') as f:
+            json.dump([e.__dict__ for e in args[0].values()], f, indent=2, ensure_ascii=False)
+        
+        # 保存新接口
+        with open(f"{self.config.output_dir}/new_endpoints.json", "w", encoding='utf-8') as f:
+            json.dump([e.__dict__ for e in args[1].values()], f, indent=2, ensure_ascii=False)
+        
+        # 保存匹配结果
+        matched_data = []
+        for old, new in args[2]:
+            matched_data.append({
+                "old": old.__dict__,
+                "new": new.__dict__
+            })
+        with open(f"{self.config.output_dir}/matched_pairs.json", "w", encoding='utf-8') as f:
+            json.dump(matched_data, f, indent=2, ensure_ascii=False)
+        
+        # 保存生成的代码
+        with open(f"{self.config.output_dir}/generated_code.json", "w", encoding='utf-8') as f:
+            json.dump(args[3], f, indent=2, ensure_ascii=False)
+
+def main():
+    """主函数"""
+    parser = argparse.ArgumentParser(description='新旧系统接口迁移工具')
+    
+    # 创建互斥组：要么是迁移模式，要么是单项目模式
+    mode_group = parser.add_mutually_exclusive_group(required=True)
+    mode_group.add_argument('--migrate', action='store_true', help='迁移模式：分析新旧两个项目')
+    mode_group.add_argument('--single', metavar='PROJECT_PATH', help='单项目模式：只分析一个项目')
+    
+    # 迁移模式参数
+    parser.add_argument('--old', help='旧项目路径（迁移模式必需）')
+    parser.add_argument('--new', help='新项目路径（迁移模式必需）')
+    
+    # 通用参数
+    parser.add_argument('--output', default='./migration_output', help='输出目录')
+    parser.add_argument('--model', default='gpt-3.5-turbo', help='AI模型名称')
+    parser.add_argument('--api-key', help='AI API密钥，或设置 OPENAI_API_KEY 环境变量')
+    parser.add_argument('-v', '--verbose', action='store_true', help='显示详细分析信息')
+    parser.add_argument('--analyze-only', action='store_true', help='仅分析项目结构，不生成迁移代码')
+    
+    args = parser.parse_args()
+    
+    # 验证参数
+    if args.migrate:
+        if not args.old or not args.new:
+            parser.error("迁移模式需要同时指定 --old 和 --new 参数")
+        
+        config = Config(
+            old_project_path=args.old,
+            new_project_path=args.new,
+            output_dir=args.output,
+            ai_model=args.model,
+            api_key=args.api_key,
+            verbose=args.verbose,
+            analyze_only=args.analyze_only or not (args.api_key or os.getenv("OPENAI_API_KEY")),
+            single_mode=False
+        )
+    else:  # 单项目模式
+        config = Config(
+            single_project_path=args.single,
+            output_dir=args.output,
+            ai_model=args.model,
+            api_key=args.api_key,
+            verbose=args.verbose,
+            analyze_only=True,  # 单项目模式默认只分析
+            single_mode=True
+        )
+    
+    # 运行工具
+    tool = MigrationTool(config)
+    tool.run()
+
+if __name__ == "__main__":
+    main()
