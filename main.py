@@ -31,11 +31,23 @@ class DeepCallChainAnalyzer:
         """构建类继承关系和接口实现映射"""
         print("🔍 构建类继承关系...")
         
+        java_files = []
         for root, dirs, files in os.walk(self.project_root):
             for file in files:
                 if file.endswith('.java'):
-                    file_path = os.path.join(root, file)
-                    self._analyze_class_structure(file_path)
+                    java_files.append(os.path.join(root, file))
+        
+        total_files = len(java_files)
+        print(f"📁 找到 {total_files} 个Java文件，开始分析...")
+        
+        for i, file_path in enumerate(java_files, 1):
+            if i % 50 == 0 or i == total_files:  # 每50个文件或最后一个文件打印进度
+                print(f"  📊 分析进度: {i}/{total_files} ({i/total_files*100:.1f}%)")
+            self._analyze_class_structure(file_path)
+        
+        interface_count = len(self.interface_implementations)
+        class_count = len(self.class_hierarchy)
+        print(f"✅ 类继承关系构建完成: {class_count} 个类, {interface_count} 个接口")
     
     def _analyze_class_structure(self, file_path: str):
         """分析单个Java文件的类结构"""
@@ -95,6 +107,10 @@ class DeepCallChainAnalyzer:
         if method_key in self.analyzed_methods:
             return {"note": "已分析过，避免循环引用"}
         
+        # 打印当前分析进度
+        indent = "  " * depth
+        print(f"{indent}🔍 分析方法: {method_name} (深度: {depth})")
+        
         self.analyzed_methods.add(method_key)
         
         try:
@@ -106,10 +122,14 @@ class DeepCallChainAnalyzer:
             
             # 查找方法定义并提取方法调用
             method_calls = self._extract_method_calls_from_content(content, method_name)
+            print(f"{indent}  📋 找到 {len(method_calls)} 个方法调用")
             
             # 递归分析每个调用
             detailed_calls = []
-            for call in method_calls:
+            for i, call in enumerate(method_calls, 1):
+                if len(method_calls) > 5 and i % 5 == 0:  # 每5个调用打印一次进度
+                    print(f"{indent}  📊 处理调用进度: {i}/{len(method_calls)}")
+                
                 call_detail = {
                     "method": call["method"],
                     "object": call.get("object", ""),
@@ -133,7 +153,7 @@ class DeepCallChainAnalyzer:
                         }
                         
                         # 递归分析实现
-                        if impl["file"] and os.path.exists(impl["file"]):
+                        if impl["file"] and os.path.exists(impl["file"]) and depth < max_depth:
                             impl_detail["sub_calls"] = self.analyze_method_calls(
                                 impl["file"], call["method"], depth + 1, max_depth
                             )
@@ -144,12 +164,14 @@ class DeepCallChainAnalyzer:
                     target_file = self._find_method_implementation_legacy(call, file_path)
                     if target_file:
                         call_detail["implementation"] = target_file
-                        call_detail["sub_calls"] = self.analyze_method_calls(
-                            target_file, call["method"], depth + 1, max_depth
-                        )
+                        if depth < max_depth:
+                            call_detail["sub_calls"] = self.analyze_method_calls(
+                                target_file, call["method"], depth + 1, max_depth
+                            )
                 
                 detailed_calls.append(call_detail)
             
+            print(f"{indent}✅ 方法 {method_name} 分析完成")
             return {
                 "file": file_path,
                 "method": method_name,
@@ -158,6 +180,7 @@ class DeepCallChainAnalyzer:
             }
             
         except Exception as e:
+            print(f"{indent}❌ 分析失败: {str(e)}")
             return {"error": f"分析失败: {str(e)}"}
     
     def _extract_method_calls_from_content(self, content: str, method_name: str) -> List[Dict]:
@@ -614,6 +637,8 @@ class DeepCallChainAnalyzer:
 
 def generate_call_tree(endpoint_path: str, output_dir: str = "./migration_output"):
     """生成指定接口的深度调用链树"""
+    print(f"🚀 开始生成调用链树: {endpoint_path}")
+    
     analysis_file = f"{output_dir}/endpoint_analysis.json"
     
     if not os.path.exists(analysis_file):
@@ -623,14 +648,17 @@ def generate_call_tree(endpoint_path: str, output_dir: str = "./migration_output
         return
     
     # 加载分析数据
+    print("📂 正在加载分析数据...")
     try:
         with open(analysis_file, 'r', encoding='utf-8') as f:
             analysis_data = json.load(f)
+        print(f"✅ 成功加载 {len(analysis_data)} 个接口的分析数据")
     except Exception as e:
         print(f"❌ 读取分析文件失败: {e}")
         return
     
     # 查找匹配的接口
+    print(f"🔍 正在查找匹配的接口: {endpoint_path}")
     matching_endpoints = []
     for endpoint_data in analysis_data:
         endpoint = endpoint_data['endpoint']
@@ -640,6 +668,8 @@ def generate_call_tree(endpoint_path: str, output_dir: str = "./migration_output
     if not matching_endpoints:
         print(f"❌ 未找到匹配的接口: {endpoint_path}")
         return
+    
+    print(f"✅ 找到 {len(matching_endpoints)} 个匹配的接口")
     
     # 选择接口
     if len(matching_endpoints) > 1:
@@ -662,6 +692,7 @@ def generate_call_tree(endpoint_path: str, output_dir: str = "./migration_output
         selected_endpoint = matching_endpoints[0]
     
     # 生成调用树
+    print("🌳 开始生成深度调用链树...")
     _generate_call_tree_md(selected_endpoint, output_dir)
 
 def _generate_call_tree_md(endpoint_data: Dict, output_dir: str):
@@ -673,6 +704,7 @@ def _generate_call_tree_md(endpoint_data: Dict, output_dir: str):
     file_path = endpoint['file_path']
     project_root = None
     
+    print("📁 正在确定项目根目录...")
     # 尝试找到项目根目录
     path_parts = file_path.split(os.sep)
     for i, part in enumerate(path_parts):
@@ -683,28 +715,45 @@ def _generate_call_tree_md(endpoint_data: Dict, output_dir: str):
     if not project_root:
         project_root = os.path.dirname(file_path)
     
-    print(f"🔍 开始深度分析接口: {endpoint['name']}")
+    print(f"� 开始深度分:析接口: {endpoint['name']}")
     print(f"📁 项目根目录: {project_root}")
     
     # 创建深度分析器
+    print("🏗️  正在初始化深度分析器...")
     analyzer = DeepCallChainAnalyzer(project_root)
     
     # 分析主方法
+    print(f"🚀 开始分析主方法: {endpoint['handler']}")
+    print("=" * 60)
     main_analysis = analyzer.analyze_method_calls(
         file_path, 
         endpoint['handler'],
         max_depth=4  # 增加深度
     )
+    print("=" * 60)
     
     # 生成Markdown内容
+    print("📝 正在生成Markdown内容...")
     md_content = _build_call_tree_markdown(endpoint, call_chain, main_analysis)
     
     # 保存到文件
     output_file = f"{output_dir}/call_tree_{endpoint['handler']}.md"
+    print(f"💾 正在保存到文件: {output_file}")
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(md_content)
     
     print(f"✅ 调用树已生成: {output_file}")
+    
+    # 显示统计信息
+    total_calls = _count_total_calls_enhanced(main_analysis.get('calls', []))
+    max_depth = _get_max_depth_enhanced(main_analysis.get('calls', []))
+    interface_count = _count_interface_implementations(main_analysis.get('calls', []))
+    
+    print(f"📊 分析统计:")
+    print(f"  - 总调用数: {total_calls}")
+    print(f"  - 最大深度: {max_depth}")
+    print(f"  - 接口实现数: {interface_count}")
+    print(f"  - 已分析方法数: {len(analyzer.analyzed_methods)}")
 
 def _build_call_tree_markdown(endpoint: Dict, call_chain: Dict, deep_analysis: Dict) -> str:
     """构建调用树的Markdown内容 - 增强版"""
@@ -1298,8 +1347,9 @@ class MigrationTool:
         print("🔍 分析接口调用链和依赖...")
         endpoint_analysis = []
         
+        total_endpoints = len(endpoints)
         for i, (name, endpoint) in enumerate(endpoints.items(), 1):
-            print(f"  分析接口 {i}/{len(endpoints)}: {endpoint.name}")
+            print(f"  📊 分析进度: {i}/{total_endpoints} ({i/total_endpoints*100:.1f}%) - {endpoint.name}")
             
             # 分析调用链
             call_chain = self.call_chain_analyzer.analyze_call_chain(
@@ -1320,6 +1370,8 @@ class MigrationTool:
             
             endpoint_analysis.append(analysis)
         
+        print("✅ 接口分析完成")
+        
         # 显示分析结果
         if self.config.verbose:
             self.display_single_project_analysis(endpoint_analysis)
@@ -1329,6 +1381,10 @@ class MigrationTool:
         self.save_single_project_results(endpoints, endpoint_analysis)
         
         print(f"🎉 单项目分析完成! 结果已保存到: {self.config.output_dir}")
+        print(f"📋 可以使用以下命令查看接口详情:")
+        print(f"   python main.py --show-endpoint <接口路径> --output {self.config.output_dir}")
+        print(f"📋 可以使用以下命令生成调用链树:")
+        print(f"   python main.py --call-tree <接口路径> --output {self.config.output_dir}")
     
     def run_migration_analysis(self):
         """运行迁移分析（原有逻辑）"""
@@ -1503,7 +1559,12 @@ class MigrationTool:
         """分析迁移计划"""
         migration_plan = []
         
-        for old_endpoint, new_endpoint in matched_pairs:
+        total_pairs = len(matched_pairs)
+        print(f"🔍 开始分析 {total_pairs} 对匹配接口的迁移计划...")
+        
+        for i, (old_endpoint, new_endpoint) in enumerate(matched_pairs, 1):
+            print(f"  📊 分析进度: {i}/{total_pairs} ({i/total_pairs*100:.1f}%) - {old_endpoint.name}")
+            
             # 分析调用链
             call_chain = self.call_chain_analyzer.analyze_call_chain(
                 old_endpoint, self.config.old_project_path
@@ -1527,7 +1588,8 @@ class MigrationTool:
                 "migration_context": migration_context,
                 "estimated_tokens": len(str(migration_context)) // 4  # 粗略估算
             })
-            
+        
+        print("✅ 迁移计划分析完成")
         return migration_plan
     
     def collect_migration_context(self, old_endpoint, call_chain, sql_mappings):
@@ -1560,20 +1622,25 @@ class MigrationTool:
         """生成迁移代码"""
         generated_code = {}
         
-        for i, plan in enumerate(migration_plan):
+        total_plans = len(migration_plan)
+        print(f"🤖 开始生成 {total_plans} 个接口的迁移代码...")
+        
+        for i, plan in enumerate(migration_plan, 1):
+            endpoint_name = plan["old_endpoint"].get("name", f"endpoint_{i}")
+            print(f"  📊 生成进度: {i}/{total_plans} ({i/total_plans*100:.1f}%) - {endpoint_name}")
+            
             if plan["estimated_tokens"] > self.config.context_window:
-                print(f"⚠️  警告: 第{i+1}个接口上下文过大 ({plan['estimated_tokens']} tokens)，跳过生成")
+                print(f"    ⚠️  警告: 接口上下文过大 ({plan['estimated_tokens']} tokens)，跳过生成")
                 continue
                 
-            print(f"🔄 生成第{i+1}/{len(migration_plan)}个接口迁移代码...")
-            
             try:
                 generated = self.ai_generator.generate_migration_code(plan)
-                endpoint_name = plan["old_endpoint"].get("name", f"endpoint_{i}")
                 generated_code[endpoint_name] = generated
+                print(f"    ✅ 生成成功")
             except Exception as e:
-                print(f"❌ 生成失败: {e}")
-                
+                print(f"    ❌ 生成失败: {e}")
+        
+        print("✅ 迁移代码生成完成")        
         return generated_code
     
     def save_single_project_results(self, endpoints: Dict, endpoint_analysis: List[Dict]):
