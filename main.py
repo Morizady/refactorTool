@@ -220,7 +220,26 @@ class DeepCallChainAnalyzer:
         line_clean = re.sub(r'//.*$', '', line)
         line_clean = re.sub(r'/\*.*?\*/', '', line_clean)
         
-        # 1. 链式调用 object.method1().method2()
+        # 1. 枚举常量调用 EnumClass.CONSTANT.method()
+        enum_pattern = r'([A-Z]\w*)\.([A-Z_]+)\.(\w+)\s*\(([^)]*)\)'
+        enum_matches = re.finditer(enum_pattern, line_clean)
+        for match in enum_matches:
+            enum_class = match.group(1)
+            enum_constant = match.group(2)
+            method = match.group(3)
+            args = match.group(4)
+            
+            # 添加枚举常量调用
+            calls.append({
+                "object": enum_constant,  # 使用常量名作为对象
+                "method": method,
+                "line": line_number,
+                "arguments": self._count_arguments_from_string(args),
+                "type": "enum_constant",
+                "enum_class": enum_class  # 保存枚举类信息
+            })
+        
+        # 2. 链式调用 object.method1().method2()
         chain_pattern = r'(\w+)(?:\.(\w+)\s*\([^)]*\))+(?:\.(\w+)\s*\([^)]*\))*'
         chain_matches = re.finditer(chain_pattern, line_clean)
         for match in chain_matches:
@@ -238,19 +257,22 @@ class DeepCallChainAnalyzer:
                     "type": "chain"
                 })
         
-        # 2. 静态方法调用 Class.method()
+        # 3. 静态方法调用 Class.method()
         static_pattern = r'([A-Z]\w*)\.(\w+)\s*\(([^)]*)\)'
         static_matches = re.finditer(static_pattern, line_clean)
         for match in static_matches:
-            calls.append({
-                "object": match.group(1),
-                "method": match.group(2),
-                "line": line_number,
-                "arguments": self._count_arguments_from_string(match.group(3)),
-                "type": "static"
-            })
+            # 避免重复添加已经在枚举调用中处理的
+            if not any(call.get("enum_class") == match.group(1) and call["method"] == match.group(2) 
+                      and call["line"] == line_number for call in calls):
+                calls.append({
+                    "object": match.group(1),
+                    "method": match.group(2),
+                    "line": line_number,
+                    "arguments": self._count_arguments_from_string(match.group(3)),
+                    "type": "static"
+                })
         
-        # 3. 实例方法调用 object.method()
+        # 4. 实例方法调用 object.method()
         instance_pattern = r'(\w+)\.(\w+)\s*\(([^)]*)\)'
         instance_matches = re.finditer(instance_pattern, line_clean)
         for match in instance_matches:
@@ -265,7 +287,7 @@ class DeepCallChainAnalyzer:
                     "type": "instance"
                 })
         
-        # 4. 构造函数调用 new Class()
+        # 5. 构造函数调用 new Class()
         constructor_pattern = r'new\s+([A-Z]\w*)\s*\(([^)]*)\)'
         constructor_matches = re.finditer(constructor_pattern, line_clean)
         for match in constructor_matches:
@@ -277,7 +299,7 @@ class DeepCallChainAnalyzer:
                 "type": "constructor"
             })
         
-        # 5. 直接方法调用 method()
+        # 6. 直接方法调用 method()
         direct_pattern = r'(?<!\w)(\w+)\s*\(([^)]*)\)'
         direct_matches = re.finditer(direct_pattern, line_clean)
         for match in direct_matches:
@@ -318,10 +340,34 @@ class DeepCallChainAnalyzer:
         method_name = call["method"]
         object_name = call.get("object", "")
         call_type = call.get("type", "instance")
+        enum_class = call.get("enum_class", "")  # 获取枚举类信息
         
         implementations = []
         
-        # 1. 处理已知的Java标准库
+        # 1. 处理枚举常量调用 (如 ResultCode.UNAUTHORIZED.getCode())
+        if call_type == "enum_constant" and enum_class:
+            # 查找枚举类文件
+            enum_file = self._find_file_by_name(f"{enum_class}.java")
+            if enum_file:
+                implementations.append({
+                    "file": enum_file,
+                    "class": enum_class,
+                    "type": "enum_class",
+                    "note": f"枚举类: {enum_class}.{object_name}.{method_name}()"
+                })
+            else:
+                # 尝试在项目中查找枚举类
+                project_enum_files = self._find_project_class_files(enum_class)
+                for file_path, class_name in project_enum_files:
+                    implementations.append({
+                        "file": file_path,
+                        "class": class_name,
+                        "type": "enum_class",
+                        "note": f"枚举类: {class_name}.{object_name}.{method_name}()"
+                    })
+            return implementations
+        
+        # 2. 处理已知的Java标准库
         if self._is_java_standard_library(object_name):
             implementations.append({
                 "file": None,
@@ -331,9 +377,12 @@ class DeepCallChainAnalyzer:
             })
             return implementations
         
-        # 2. 查找项目中的实现
+        # 3. 查找项目中的实现
         if object_name:
-            # 查找直接的类实现
+            # 2.1 Spring Service变量名到接口名的映射
+            service_class_name = self._resolve_service_class_name(object_name, current_file)
+            
+            # 2.2 查找直接的类实现
             class_file = self._find_file_by_name(f"{object_name}.java")
             if class_file:
                 implementations.append({
@@ -342,7 +391,49 @@ class DeepCallChainAnalyzer:
                     "type": "concrete"
                 })
             
-            # 查找接口的所有实现
+            # 2.3 处理常见的项目内部类（如CommonResult、ResultCode等）
+            project_class_files = self._find_project_class_files(object_name)
+            for file_path, class_name in project_class_files:
+                implementations.append({
+                    "file": file_path,
+                    "class": class_name,
+                    "type": "project_class"
+                })
+            
+            # 2.4 如果是Service变量，查找对应的Service接口和实现
+            if service_class_name:
+                # 查找Service接口
+                service_interface_file = self._find_file_by_name(f"{service_class_name}.java")
+                if service_interface_file:
+                    implementations.append({
+                        "file": service_interface_file,
+                        "class": service_class_name,
+                        "type": "service_interface"
+                    })
+                
+                # 查找ServiceImpl实现类
+                impl_class_name = service_class_name + "Impl"
+                impl_file = self._find_file_by_name(f"{impl_class_name}.java")
+                if impl_file:
+                    implementations.append({
+                        "file": impl_file,
+                        "class": impl_class_name,
+                        "type": "service_implementation"
+                    })
+            
+            # 2.5 通用Service接口处理
+            if object_name.endswith("Service"):
+                # 查找对应的ServiceImpl实现类
+                impl_class_name = object_name + "Impl"
+                impl_file = self._find_file_by_name(f"{impl_class_name}.java")
+                if impl_file:
+                    implementations.append({
+                        "file": impl_file,
+                        "class": impl_class_name,
+                        "type": "service_implementation"
+                    })
+            
+            # 2.6 查找接口的所有实现
             if object_name in self.interface_implementations:
                 for impl in self.interface_implementations[object_name]:
                     implementations.append({
@@ -351,13 +442,24 @@ class DeepCallChainAnalyzer:
                         "type": "interface_implementation"
                     })
             
-            # 查找继承关系中的实现
+            # 2.7 查找继承关系中的实现
             for class_name, info in self.class_hierarchy.items():
                 if info.get("parent") == object_name:
                     implementations.append({
                         "file": info["file"],
                         "class": class_name,
                         "type": "inheritance"
+                    })
+            
+            # 2.8 模糊匹配：查找包含object_name的类
+            if not implementations:
+                # 尝试查找类似的类名
+                similar_files = self._find_similar_class_files(object_name)
+                for file_path, class_name in similar_files:
+                    implementations.append({
+                        "file": file_path,
+                        "class": class_name,
+                        "type": "similar_match"
                     })
         
         # 3. 在当前文件中查找本地方法
@@ -369,6 +471,44 @@ class DeepCallChainAnalyzer:
             })
         
         return implementations
+    
+    def _resolve_service_class_name(self, variable_name: str, current_file: str) -> Optional[str]:
+        """根据变量名解析Service类名"""
+        # 常见的Spring Service变量名模式
+        service_mappings = {
+            "adminService": "UmsAdminService",
+            "roleService": "UmsRoleService", 
+            "userService": "UmsUserService",
+            "menuService": "UmsMenuService",
+            "resourceService": "UmsResourceService",
+        }
+        
+        # 直接映射
+        if variable_name in service_mappings:
+            return service_mappings[variable_name]
+        
+        # 模式匹配：xxxService -> XxxService
+        if variable_name.endswith("Service"):
+            # 将首字母大写
+            class_name = variable_name[0].upper() + variable_name[1:]
+            return class_name
+        
+        # 尝试从当前文件中解析@Autowired注解
+        try:
+            with open(current_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # 查找@Autowired private XxxService xxxService;
+            import re
+            pattern = rf'@Autowired\s+(?:private\s+)?(\w+Service)\s+{re.escape(variable_name)}\s*;'
+            match = re.search(pattern, content)
+            if match:
+                return match.group(1)
+                
+        except Exception:
+            pass
+        
+        return None
     
     def _find_method_implementation_legacy(self, call: Dict, current_file: str) -> Optional[str]:
         """原有的方法实现查找逻辑（向后兼容）"""
@@ -428,6 +568,49 @@ class DeepCallChainAnalyzer:
             if filename in files:
                 return os.path.join(root, filename)
         return None
+    
+    def _find_similar_class_files(self, class_name: str) -> List[tuple]:
+        """查找相似的类文件，返回(文件路径, 类名)列表"""
+        similar_files = []
+        
+        # 常见的命名模式
+        patterns = [
+            f"{class_name}Impl.java",      # ServiceImpl模式
+            f"{class_name}Implementation.java",  # ServiceImplementation模式
+            f"Default{class_name}.java",   # DefaultService模式
+            f"{class_name}Bean.java",      # ServiceBean模式
+        ]
+        
+        for root, dirs, files in os.walk(self.project_root):
+            for file in files:
+                if file.endswith('.java'):
+                    # 检查是否匹配任何模式
+                    for pattern in patterns:
+                        if file == pattern:
+                            file_path = os.path.join(root, file)
+                            class_name_from_file = file[:-5]  # 去掉.java后缀
+                            similar_files.append((file_path, class_name_from_file))
+                            break
+                    
+                    # 检查文件名是否包含目标类名
+                    if class_name.lower() in file.lower() and file != f"{class_name}.java":
+                        file_path = os.path.join(root, file)
+                        class_name_from_file = file[:-5]  # 去掉.java后缀
+                        similar_files.append((file_path, class_name_from_file))
+        
+        return similar_files
+    
+    def _find_project_class_files(self, class_name: str) -> List[tuple]:
+        """查找项目中的类文件，返回(文件路径, 类名)列表"""
+        project_files = []
+        
+        for root, dirs, files in os.walk(self.project_root):
+            for file in files:
+                if file == f"{class_name}.java":
+                    file_path = os.path.join(root, file)
+                    project_files.append((file_path, class_name))
+        
+        return project_files
 
 def generate_call_tree(endpoint_path: str, output_dir: str = "./migration_output"):
     """生成指定接口的深度调用链树"""
@@ -656,7 +839,12 @@ def _build_tree_recursive_enhanced(calls: List[Dict], lines: List[str], indent: 
                     'interface_implementation': '接口实现',
                     'inheritance': '继承实现',
                     'standard_library': 'Java标准库',
-                    'local': '本地方法'
+                    'local': '本地方法',
+                    'service_implementation': 'Service实现',
+                    'service_interface': 'Service接口',
+                    'project_class': '项目类',
+                    'similar_match': '相似匹配',
+                    'enum_class': '枚举类'
                 }.get(impl_type, '未知类型')
                 
                 lines.append(f"{indent}  │ └── {impl_class} ({type_desc})")
