@@ -40,11 +40,39 @@ python main.py --show-endpoint "category/page"
 - 📝 自动定位并显示源代码片段
 
 ### 深度调用链分析
-生成接口的深度调用链树，分析方法调用关系。
+生成接口的深度调用链树，支持两种解析方法：
 
+#### 解析方法选择
+
+**1. 正则表达式解析（默认）**
 ```bash
-# 生成调用链树
-python main.py --call-tree "/admin/category/page"
+python main.py --call-tree "/admin/category/page" --parse-method regex
+```
+- 优势: 速度快，容错性强
+- 适用: 快速分析，大型项目扫描
+
+**2. AST语法树解析**
+```bash
+python main.py --call-tree "/admin/category/page" --parse-method ast
+```
+- 优势: 精确度高，语法理解准确
+- 适用: 精确分析，代码质量要求高
+- 依赖: 需要安装 `pip install javalang`
+
+#### 参数说明
+- `--parse-method`: 选择解析方法 (`regex` 或 `ast`)
+- `--max-depth`: 设置分析最大深度 (默认: 4)
+
+#### 使用示例
+```bash
+# 快速分析（正则表达式）
+python main.py --call-tree "/user/user/login"
+
+# 精确分析（AST语法树）
+python main.py --call-tree "/user/user/login" --parse-method ast
+
+# 自定义深度分析
+python main.py --call-tree "/admin/category/page" --parse-method ast --max-depth 6
 ```
 
 ### 迁移分析
