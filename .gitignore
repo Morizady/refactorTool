@@ -4,3 +4,4 @@
 *__pycache__*
 *migration_output*
 *.vscode*
+test_*py

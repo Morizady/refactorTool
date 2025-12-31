@@ -103,7 +103,8 @@ class DeepCallChainAnalyzer:
         if depth > max_depth:
             return {"note": "达到最大深度限制"}
         
-        method_key = f"{file_path}:{method_name}"
+        # 使用更精确的循环检测标识符
+        method_key = f"{file_path}:{method_name}:{depth}"
         if method_key in self.analyzed_methods:
             return {"note": "已分析过，避免循环引用"}
         
@@ -122,13 +123,16 @@ class DeepCallChainAnalyzer:
             
             # 查找方法定义并提取方法调用
             method_calls = self._extract_method_calls_from_content(content, method_name)
-            print(f"{indent}  📋 找到 {len(method_calls)} 个方法调用")
+            
+            # 去重和过滤方法调用
+            unique_calls = self._deduplicate_method_calls(method_calls)
+            print(f"{indent}  📋 找到 {len(method_calls)} 个方法调用，去重后 {len(unique_calls)} 个")
             
             # 递归分析每个调用
             detailed_calls = []
-            for i, call in enumerate(method_calls, 1):
-                if len(method_calls) > 5 and i % 5 == 0:  # 每5个调用打印一次进度
-                    print(f"{indent}  📊 处理调用进度: {i}/{len(method_calls)}")
+            for i, call in enumerate(unique_calls, 1):
+                if len(unique_calls) > 5 and i % 5 == 0:  # 每5个调用打印一次进度
+                    print(f"{indent}  📊 处理调用进度: {i}/{len(unique_calls)}")
                 
                 call_detail = {
                     "method": call["method"],
@@ -152,8 +156,11 @@ class DeepCallChainAnalyzer:
                             "type": impl.get("type", "concrete")
                         }
                         
-                        # 递归分析实现
-                        if impl["file"] and os.path.exists(impl["file"]) and depth < max_depth:
+                        # 递归分析实现（避免对标准库和已知类型进行深度分析）
+                        if (impl["file"] and os.path.exists(impl["file"]) and 
+                            depth < max_depth and 
+                            impl.get("type") not in ["standard_library", "enum_class"]):
+                            
                             impl_detail["sub_calls"] = self.analyze_method_calls(
                                 impl["file"], call["method"], depth + 1, max_depth
                             )
@@ -162,12 +169,11 @@ class DeepCallChainAnalyzer:
                 else:
                     # 如果没找到实现，尝试原有的查找方式
                     target_file = self._find_method_implementation_legacy(call, file_path)
-                    if target_file:
+                    if target_file and depth < max_depth:
                         call_detail["implementation"] = target_file
-                        if depth < max_depth:
-                            call_detail["sub_calls"] = self.analyze_method_calls(
-                                target_file, call["method"], depth + 1, max_depth
-                            )
+                        call_detail["sub_calls"] = self.analyze_method_calls(
+                            target_file, call["method"], depth + 1, max_depth
+                        )
                 
                 detailed_calls.append(call_detail)
             
@@ -193,7 +199,6 @@ class DeepCallChainAnalyzer:
         method_end = -1
         brace_count = 0
         in_method = False
-        paren_count = 0
         
         for i, line in enumerate(lines):
             # 更精确的方法定义匹配
@@ -201,19 +206,20 @@ class DeepCallChainAnalyzer:
                 method_start = i
                 in_method = True
                 brace_count = 0
-                paren_count = 0
+                # 计算方法定义行的大括号
+                brace_count += line.count('{') - line.count('}')
+                continue
             
             if in_method:
-                # 计算大括号和小括号
+                # 计算大括号
                 brace_count += line.count('{') - line.count('}')
-                paren_count += line.count('(') - line.count(')')
                 
-                # 提取方法调用
+                # 提取方法调用（排除方法定义行）
                 method_calls = self._parse_method_calls_in_line_enhanced(line, i + 1)
                 calls.extend(method_calls)
                 
-                # 如果大括号平衡且不在参数列表中，说明方法结束
-                if brace_count == 0 and paren_count == 0 and method_start != -1 and i > method_start:
+                # 如果大括号平衡，说明方法结束
+                if brace_count == 0 and i > method_start:
                     method_end = i
                     break
         
@@ -223,15 +229,35 @@ class DeepCallChainAnalyzer:
         """判断是否是方法定义行"""
         import re
         
-        # 匹配方法定义模式
+        # 更精确的方法定义模式
+        # 必须以访问修饰符开头，且方法名前有返回类型
         patterns = [
-            rf'(?:public|private|protected)?\s*(?:static)?\s*(?:\w+\s+)*{re.escape(method_name)}\s*\(',
-            rf'(?:public|private|protected)\s+(?:static\s+)?(?:\w+\s+)+{re.escape(method_name)}\s*\(',
+            # public/private/protected + 可选static + 返回类型 + 方法名 + (
+            rf'^\s*(?:public|private|protected)\s+(?:static\s+)?(?:\w+(?:<[^>]*>)?\s+)+{re.escape(method_name)}\s*\(',
+            # @注解后的方法定义
+            rf'^\s*(?:public|private|protected)\s+(?:static\s+)?(?:\w+(?:<[^>]*>)?\s+)*{re.escape(method_name)}\s*\(',
         ]
         
+        # 排除明显不是方法定义的情况
+        exclude_patterns = [
+            r'^\s*\w+\.',  # 以对象.开头的调用
+            r'^\s*return\s+',  # return语句
+            r'^\s*if\s*\(',  # if语句
+            r'^\s*while\s*\(',  # while语句
+            r'^\s*for\s*\(',  # for语句
+        ]
+        
+        # 先检查排除模式
+        for exclude_pattern in exclude_patterns:
+            if re.search(exclude_pattern, line):
+                return False
+        
+        # 再检查方法定义模式
         for pattern in patterns:
             if re.search(pattern, line):
                 return True
+        
+        return False
         return False
     
     def _parse_method_calls_in_line_enhanced(self, line: str, line_number: int) -> List[Dict]:
@@ -339,7 +365,153 @@ class DeepCallChainAnalyzer:
         
         return calls
     
+    def _deduplicate_method_calls(self, method_calls: List[Dict]) -> List[Dict]:
+        """去重方法调用，避免同一个调用被重复识别"""
+        # 第一步：预处理，统一构造函数的表示
+        processed_calls = []
+        
+        for call in method_calls:
+            obj = call.get("object", "")
+            method = call.get("method", "")
+            call_type = call.get("type", "instance")
+            line = call.get("line", 0)
+            
+            # 统一所有构造函数调用的表示
+            is_constructor = False
+            
+            if method == "<init>":
+                # new ClassName() -> ClassName.<init>()
+                is_constructor = True
+                target_class = obj
+            elif call_type == "direct" and obj and method == obj:
+                # ClassName.ClassName() 形式
+                is_constructor = True
+                target_class = obj
+            elif call_type == "direct" and not obj and method and method[0].isupper():
+                # ServiceResult() 形式（无对象名的构造函数调用）
+                is_constructor = True
+                target_class = method
+            
+            if is_constructor:
+                # 统一为 ClassName.ClassName() [构造] 的形式
+                call["object"] = target_class
+                call["method"] = target_class
+                call["type"] = "constructor"
+            
+            processed_calls.append(call)
+        
+        # 第二步：基于唯一键去重
+        unique_calls = []
+        seen_calls = {}
+        
+        for call in processed_calls:
+            obj = call.get("object", "")
+            method = call.get("method", "")
+            line = call.get("line", 0)
+            call_type = call.get("type", "instance")
+            
+            # 创建唯一键：对象.方法@行号
+            unique_key = f"{obj}.{method}@{line}"
+            
+            if unique_key in seen_calls:
+                existing_call = seen_calls[unique_key]
+                
+                # 定义类型优先级
+                type_priority = {
+                    "static": 4,
+                    "enum_constant": 4,
+                    "constructor": 3,
+                    "instance": 2,
+                    "chain": 2,
+                    "direct": 1
+                }
+                
+                current_priority = type_priority.get(call_type, 0)
+                existing_priority = type_priority.get(existing_call.get("type"), 0)
+                
+                if current_priority > existing_priority:
+                    # 替换为优先级更高的调用
+                    unique_calls = [c for c in unique_calls if c != existing_call]
+                    seen_calls[unique_key] = call
+                    unique_calls.append(call)
+            else:
+                seen_calls[unique_key] = call
+                unique_calls.append(call)
+        
+        return unique_calls
+
     def _count_arguments_from_string(self, args_str: str) -> int:
+        """从参数字符串计算参数数量"""
+        if not args_str.strip():
+            return 0
+        
+        # 简单的参数计数，考虑嵌套括号
+        paren_level = 0
+        comma_count = 0
+        
+        for char in args_str:
+            if char == '(':
+                paren_level += 1
+            elif char == ')':
+                paren_level -= 1
+            elif char == ',' and paren_level == 0:
+                comma_count += 1
+        
+        return comma_count + 1 if args_str.strip() else 0
+    
+        seen_calls = set()
+        
+        for call in method_calls:
+            # 创建唯一标识符
+            obj = call.get("object", "")
+            method = call.get("method", "")
+            line = call.get("line", 0)
+            call_type = call.get("type", "instance")
+            
+            # 对于构造函数调用，统一处理
+            if method == "<init>":
+                method = obj  # 将构造函数调用统一为类名
+                call["method"] = method
+                call["type"] = "constructor"
+            
+            # 创建唯一键：对象.方法@行号
+            unique_key = f"{obj}.{method}@{line}"
+            
+            if unique_key not in seen_calls:
+                seen_calls.add(unique_key)
+                
+                # 优先保留更具体的调用类型
+                existing_call = None
+                for existing in unique_calls:
+                    if (existing.get("object") == obj and 
+                        existing.get("method") == method and 
+                        existing.get("line") == line):
+                        existing_call = existing
+                        break
+                
+                if existing_call:
+                    # 如果已存在，选择更具体的类型
+                    type_priority = {
+                        "static": 3,
+                        "instance": 2, 
+                        "chain": 2,
+                        "constructor": 2,
+                        "direct": 1,
+                        "enum_constant": 3
+                    }
+                    
+                    current_priority = type_priority.get(call_type, 0)
+                    existing_priority = type_priority.get(existing_call.get("type"), 0)
+                    
+                    if current_priority > existing_priority:
+                        # 替换为更具体的调用
+                        unique_calls.remove(existing_call)
+                        unique_calls.append(call)
+                else:
+                    unique_calls.append(call)
+        
+        return unique_calls
+    
         """从参数字符串计算参数数量"""
         if not args_str.strip():
             return 0
@@ -803,7 +975,7 @@ def _build_call_tree_markdown(endpoint: Dict, call_chain: Dict, deep_analysis: D
     else:
         lines.append("```")
         lines.append(f"📁 {endpoint['handler']}() - 主方法")
-        _build_tree_recursive_enhanced(deep_analysis.get('calls', []), lines, "  ")
+        _build_tree_recursive_enhanced(deep_analysis.get('calls', []), lines, "  ", set(), endpoint['handler'])
         lines.append("```")
     
     lines.append("")
@@ -850,8 +1022,11 @@ def _build_call_tree_markdown(endpoint: Dict, call_chain: Dict, deep_analysis: D
     
     return "\n".join(lines)
 
-def _build_tree_recursive_enhanced(calls: List[Dict], lines: List[str], indent: str):
-    """递归构建调用树 - 增强版"""
+def _build_tree_recursive_enhanced(calls: List[Dict], lines: List[str], indent: str, visited_methods: set = None, current_method: str = ""):
+    """递归构建调用树 - 增强版，避免重复显示"""
+    if visited_methods is None:
+        visited_methods = set()
+    
     for call in calls:
         method = call.get('method', 'unknown')
         obj = call.get('object', '')
@@ -865,6 +1040,14 @@ def _build_tree_recursive_enhanced(calls: List[Dict], lines: List[str], indent: 
         else:
             call_display = f"{method}()"
         
+        # 创建方法标识符用于避免重复显示
+        method_id = f"{obj}.{method}" if obj else method
+        
+        # 跳过递归调用自己的情况
+        if method == current_method and call_type == "direct":
+            lines.append(f"{indent}├── {call_display} [递归调用] - {args}个参数 (行:{line_num})")
+            continue
+        
         # 添加类型标识
         type_marker = ""
         if call_type == "static":
@@ -873,44 +1056,88 @@ def _build_tree_recursive_enhanced(calls: List[Dict], lines: List[str], indent: 
             type_marker = " [构造]"
         elif call_type == "chain":
             type_marker = " [链式]"
+        elif call_type == "enum_constant":
+            type_marker = " [枚举]"
         
         lines.append(f"{indent}├── {call_display}{type_marker} - {args}个参数 (行:{line_num})")
+        
+        # 检查是否已经显示过这个方法（避免循环显示）
+        full_method_id = f"{method_id}@{line_num}"
+        if full_method_id in visited_methods:
+            lines.append(f"{indent}  └── [已分析过，避免重复显示]")
+            continue
+        
+        visited_methods.add(full_method_id)
         
         # 处理多个实现
         implementations = call.get('implementations', [])
         if implementations:
-            for i, impl in enumerate(implementations):
-                impl_type = impl.get('type', 'concrete')
-                impl_class = impl.get('class', 'unknown')
-                
-                type_desc = {
-                    'concrete': '具体实现',
-                    'interface_implementation': '接口实现',
-                    'inheritance': '继承实现',
-                    'standard_library': 'Java标准库',
-                    'local': '本地方法',
-                    'service_implementation': 'Service实现',
-                    'service_interface': 'Service接口',
-                    'project_class': '项目类',
-                    'similar_match': '相似匹配',
-                    'enum_class': '枚举类'
-                }.get(impl_type, '未知类型')
-                
-                lines.append(f"{indent}  │ └── {impl_class} ({type_desc})")
+            # 过滤掉标准库和枚举类的实现，避免过度展开
+            filtered_impls = [impl for impl in implementations 
+                            if impl.get('type') not in ['standard_library', 'enum_class']]
+            
+            if not filtered_impls:
+                # 如果只有标准库实现，简单显示
+                std_impls = [impl for impl in implementations 
+                           if impl.get('type') in ['standard_library', 'enum_class']]
+                if std_impls:
+                    impl = std_impls[0]
+                    impl_class = impl.get('class', 'unknown')
+                    impl_type = impl.get('type', 'concrete')
+                    type_desc = '标准库' if impl_type == 'standard_library' else '枚举类'
+                    lines.append(f"{indent}  └── {impl_class} ({type_desc})")
+                continue
+            
+            # 只显示最相关的实现（通常是第一个）
+            impl = filtered_impls[0]
+            impl_type = impl.get('type', 'concrete')
+            impl_class = impl.get('class', 'unknown')
+            
+            type_desc = {
+                'concrete': '具体实现',
+                'interface_implementation': '接口实现',
+                'inheritance': '继承实现',
+                'local': '本地方法',
+                'service_implementation': 'Service实现',
+                'service_interface': 'Service接口',
+                'project_class': '项目类',
+                'similar_match': '相似匹配'
+            }.get(impl_type, '未知类型')
+            
+            # 对于本地方法，不显示实现详情，直接展开子调用
+            if impl_type == 'local':
+                sub_calls = impl.get('sub_calls', {})
+                if isinstance(sub_calls, dict) and 'calls' in sub_calls:
+                    # 过滤掉与当前方法相同的调用，避免无限递归显示
+                    filtered_sub_calls = [sc for sc in sub_calls['calls'] 
+                                        if sc.get('method') != method or sc.get('object') != obj]
+                    if filtered_sub_calls:
+                        _build_tree_recursive_enhanced(filtered_sub_calls, lines, indent + "  ", visited_methods.copy(), method)
+                elif isinstance(sub_calls, dict) and 'note' in sub_calls:
+                    lines.append(f"{indent}  └── {sub_calls['note']}")
+            else:
+                lines.append(f"{indent}  └── {impl_class} ({type_desc})")
                 
                 # 递归处理子调用
                 sub_calls = impl.get('sub_calls', {})
                 if isinstance(sub_calls, dict) and 'calls' in sub_calls:
-                    _build_tree_recursive_enhanced(sub_calls['calls'], lines, indent + "  │   ")
+                    _build_tree_recursive_enhanced(sub_calls['calls'], lines, indent + "    ", visited_methods.copy(), method)
                 elif isinstance(sub_calls, dict) and 'note' in sub_calls:
-                    lines.append(f"{indent}  │     └── {sub_calls['note']}")
+                    lines.append(f"{indent}    └── {sub_calls['note']}")
         else:
             # 处理单个实现（向后兼容）
             sub_calls = call.get('sub_calls', {})
             if isinstance(sub_calls, dict) and 'calls' in sub_calls:
-                _build_tree_recursive_enhanced(sub_calls['calls'], lines, indent + "  ")
+                # 过滤掉与当前方法相同的调用
+                filtered_sub_calls = [sc for sc in sub_calls['calls'] 
+                                    if sc.get('method') != method or sc.get('object') != obj]
+                if filtered_sub_calls:
+                    _build_tree_recursive_enhanced(filtered_sub_calls, lines, indent + "  ", visited_methods.copy(), method)
             elif isinstance(sub_calls, dict) and 'note' in sub_calls:
                 lines.append(f"{indent}  └── {sub_calls['note']}")
+        
+        # 从已访问集合中移除，允许在不同分支中重新显示
+        visited_methods.discard(full_method_id)
 
 def _build_implementation_analysis(calls: List[Dict], lines: List[str]):
     """构建接口实现分析"""
