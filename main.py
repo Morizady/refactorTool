@@ -306,35 +306,72 @@ class DeepCallChainAnalyzer:
                     "type": "chain"
                 })
         
-        # 3. 静态方法调用 Class.method()
-        static_pattern = r'([A-Z]\w*)\.(\w+)\s*\(([^)]*)\)'
+        # 3. 静态方法调用 Class.method() - 只匹配真正的类名（完全大写开头）
+        static_pattern = r'\b([A-Z][A-Z_]*[A-Z]|[A-Z][a-z]*[A-Z]\w*)\.(\w+)\s*\(([^)]*)\)'
         static_matches = re.finditer(static_pattern, line_clean)
         for match in static_matches:
-            # 避免重复添加已经在枚举调用中处理的
-            if not any(call.get("enum_class") == match.group(1) and call["method"] == match.group(2) 
-                      and call["line"] == line_number for call in calls):
-                calls.append({
-                    "object": match.group(1),
-                    "method": match.group(2),
-                    "line": line_number,
-                    "arguments": self._count_arguments_from_string(match.group(3)),
-                    "type": "static"
-                })
+            # 确保是真正的类名，不是驼峰命名的变量名
+            class_name = match.group(1)
+            if class_name[0].isupper() and (len(class_name) == 1 or class_name[1].isupper() or not any(c.islower() for c in class_name[:3])):
+                # 避免重复添加已经在枚举调用中处理的
+                if not any(call.get("enum_class") == class_name and call["method"] == match.group(2) 
+                          and call["line"] == line_number for call in calls):
+                    calls.append({
+                        "object": class_name,
+                        "method": match.group(2),
+                        "line": line_number,
+                        "arguments": self._count_arguments_from_string(match.group(3)),
+                        "type": "static"
+                    })
+                    
+                    # 调试输出：跟踪merge方法
+                    if match.group(2) == "merge":
+                        print(f"DEBUG: 静态方法匹配 - 行内容: {line_clean}")
+                        print(f"DEBUG: 静态方法匹配 - 对象: {class_name}, 方法: {match.group(2)}, 行: {line_number}")
         
-        # 4. 实例方法调用 object.method()
-        instance_pattern = r'(\w+)\.(\w+)\s*\(([^)]*)\)'
-        instance_matches = re.finditer(instance_pattern, line_clean)
-        for match in instance_matches:
-            # 避免重复添加已经在链式调用中处理的
-            if not any(call["object"] == match.group(1) and call["method"] == match.group(2) 
-                      and call["line"] == line_number for call in calls):
+        # 4. 实例方法调用 object.method() - 使用简单模式匹配所有可能的调用
+        # 先找到所有的 object.method( 模式，然后单独处理参数
+        simple_instance_pattern = r'(\w+)\.(\w+)\s*\('
+        simple_matches = re.finditer(simple_instance_pattern, line_clean)
+        
+        for match in simple_matches:
+            obj_name = match.group(1)
+            method_name = match.group(2)
+            
+            # 跳过已经在其他模式中处理的调用
+            if any(call["object"] == obj_name and call["method"] == method_name 
+                  and call["line"] == line_number for call in calls):
+                continue
+            
+            # 找到完整的方法调用（包括参数）
+            start_pos = match.end() - 1  # 从 '(' 开始
+            paren_count = 0
+            end_pos = start_pos
+            
+            for i, char in enumerate(line_clean[start_pos:], start_pos):
+                if char == '(':
+                    paren_count += 1
+                elif char == ')':
+                    paren_count -= 1
+                    if paren_count == 0:
+                        end_pos = i
+                        break
+            
+            # 提取参数部分
+            if end_pos > start_pos:
+                args_part = line_clean[start_pos+1:end_pos]
                 calls.append({
-                    "object": match.group(1),
-                    "method": match.group(2),
+                    "object": obj_name,
+                    "method": method_name,
                     "line": line_number,
-                    "arguments": self._count_arguments_from_string(match.group(3)),
+                    "arguments": self._count_arguments_from_string(args_part),
                     "type": "instance"
                 })
+                
+                # 调试输出：跟踪merge方法的对象名称
+                if match.group(2) == "merge":
+                    print(f"DEBUG: 实例方法匹配 - 行内容: {line_clean}")
+                    print(f"DEBUG: 实例方法匹配 - 对象: {match.group(1)}, 方法: {match.group(2)}, 行: {line_number}")
         
         # 5. 构造函数调用 new Class()
         constructor_pattern = r'new\s+([A-Z]\w*)\s*\(([^)]*)\)'
@@ -695,7 +732,7 @@ class DeepCallChainAnalyzer:
             
             # 查找@Autowired private XxxService xxxService;
             import re
-            pattern = rf'@Autowired\s+(?:private\s+)?(\w+Service)\s+{re.escape(variable_name)}\s*;'
+            pattern = rf'@Autowired\s+(?:private\s+)?(\w+(?:Service|ServiceImpl))\s+{re.escape(variable_name)}\s*;'
             match = re.search(pattern, content)
             if match:
                 return match.group(1)
