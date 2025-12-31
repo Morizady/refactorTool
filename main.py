@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-新旧系统接口映射与迁移工具 - 支持单项目分析
+Java项目接口分析工具 - 专注于Spring Boot项目分析
 """
 
 import os
@@ -324,10 +324,7 @@ class DeepCallChainAnalyzer:
                         "type": "static"
                     })
                     
-                    # 调试输出：跟踪merge方法
-                    if match.group(2) == "merge":
-                        print(f"DEBUG: 静态方法匹配 - 行内容: {line_clean}")
-                        print(f"DEBUG: 静态方法匹配 - 对象: {class_name}, 方法: {match.group(2)}, 行: {line_number}")
+
         
         # 4. 实例方法调用 object.method() - 使用简单模式匹配所有可能的调用
         # 先找到所有的 object.method( 模式，然后单独处理参数
@@ -368,10 +365,7 @@ class DeepCallChainAnalyzer:
                     "type": "instance"
                 })
                 
-                # 调试输出：跟踪merge方法的对象名称
-                if match.group(2) == "merge":
-                    print(f"DEBUG: 实例方法匹配 - 行内容: {line_clean}")
-                    print(f"DEBUG: 实例方法匹配 - 对象: {match.group(1)}, 方法: {match.group(2)}, 行: {line_number}")
+
         
         # 5. 构造函数调用 new Class()
         constructor_pattern = r'new\s+([A-Z]\w*)\s*\(([^)]*)\)'
@@ -2002,7 +1996,7 @@ class MigrationTool:
 
 def main():
     """主函数"""
-    parser = argparse.ArgumentParser(description='新旧系统接口迁移工具')
+    parser = argparse.ArgumentParser(description='Java项目接口分析工具')
     
     # 创建互斥组：要么是迁移模式，要么是单项目模式，要么是接口查看模式，要么是调用树生成模式
     mode_group = parser.add_mutually_exclusive_group(required=True)

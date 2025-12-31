@@ -1,5 +1,49 @@
 # 更新日志
 
+## v3.0.0 - 专注Java项目分析
+
+### 🎯 重大变更
+
+#### 专注Java分析
+- **移除多语言支持**: 删除Python、Go、JavaScript等语言的支持
+- **专注Spring Boot**: 专门优化Java Spring Boot项目的分析能力
+- **简化架构**: 移除不必要的通用代码，提高分析精度和性能
+
+#### 清理的功能
+- 删除Python Flask/Django接口提取
+- 删除Go Gin框架支持
+- 删除JavaScript/TypeScript Express支持
+- 移除通用调用链分析
+- 简化文件扫描逻辑，只处理.java文件
+
+#### 保留的核心功能
+- ✅ Java Spring Boot接口提取和分析
+- ✅ 深度调用链分析（使用javalang + 正则表达式混合方案）
+- ✅ MyBatis SQL映射分析
+- ✅ 接口复杂度评估
+- ✅ 调用树可视化
+- ✅ 源码定位和显示
+
+### 🔧 技术改进
+
+#### 性能优化
+- 减少文件扫描范围，只处理Java文件
+- 优化正则表达式，专门针对Java语法
+- 移除不必要的语言检测逻辑
+
+#### 代码简化
+- 删除`usage_examples.py`和`main_single.py`
+- 合并功能到`main.py`
+- 简化`EndpointExtractor`类，只保留Spring相关逻辑
+- 清理`CallChainAnalyzer`，移除Python/通用分析方法
+
+### 📚 文档更新
+- 更新README，专注Java项目说明
+- 修改使用指南，移除多语言示例
+- 更新功能特性描述
+
+---
+
 ## v2.0.0 - 新增接口查看功能
 
 ### 🎉 新增功能

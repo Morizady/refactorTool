@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HTTP接口提取器 - 支持多种框架
+Java HTTP接口提取器 - 专注于Spring Boot框架
 """
 
 import re
@@ -23,56 +23,42 @@ class ApiEndpoint:
     parameters: List[str] = field(default_factory=list)  # 参数列表
     return_type: Optional[str] = None
     annotations: List[str] = field(default_factory=list)  # 注解
-    framework: str = "unknown"   # 框架类型: spring, flask, django, gin等
+    framework: str = "spring"   # 框架类型: spring
     
     def __hash__(self):
         return hash(f"{self.path}:{self.method}:{self.file_path}")
 
 class EndpointExtractor:
-    """HTTP接口提取器"""
+    """Java HTTP接口提取器 - 专注于Spring Boot框架"""
     
     def __init__(self):
-        # 定义各种框架的识别模式
+        # 定义Spring框架的识别模式
         self.patterns = {
             "spring": {
                 "controller": r'@(RestController|Controller)\s*.*?class\s+(\w+)',
                 "mapping": r'@(GetMapping|PostMapping|PutMapping|DeleteMapping|RequestMapping|PatchMapping)\s*\(\s*(?:value\s*=\s*)?["\']([^"\']+)["\']',
                 "method": r'(public|private|protected)\s+[^{]*?\s+(\w+)\s*\([^)]*\)'
-            },
-            "flask": {
-                "route": r'@app\.route\(["\']([^"\']+)["\'][^)]*\)\s*\n\s*def\s+(\w+)',
-                "method": r'methods=\[["\']([^"\']+)["\'\]\]'
-            },
-            "django": {
-                "url": r'path\(["\']([^"\']+)["\'][^)]*,\s*([^)]+)\)',
-                "view": r'def\s+(\w+)\s*\([^)]*\)'
-            },
-            "gin": {
-                "route": r'\.(GET|POST|PUT|DELETE|PATCH)\(["\']([^"\']+)["\'][^)]*,\s*(\w+)'
             }
         }
         
     def extract_from_project(self, project_path: str) -> Dict[str, ApiEndpoint]:
-        """从项目中提取所有HTTP接口"""
+        """从Java项目中提取所有HTTP接口"""
         endpoints = {}
         
         project_path = Path(project_path)
         
-        # 支持的文件扩展名
-        extensions = {'.java', '.py', '.go', '.js', '.ts', '.php'}
-        
-        # 遍历项目文件
+        # 遍历项目文件，只处理Java文件
         for root, dirs, files in os.walk(project_path):
             # 跳过不需要的目录
-            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in {'node_modules', 'venv', '__pycache__'}]
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in {'target', 'build', 'node_modules', 'venv', '__pycache__'}]
             
             for file in files:
-                file_path = Path(root) / file
-                
-                if file_path.suffix.lower() not in extensions:
+                if not file.endswith('.java'):
                     continue
                     
-                # 根据文件类型选择合适的提取器
+                file_path = Path(root) / file
+                
+                # 提取Java接口
                 file_endpoints = self.extract_endpoints_from_file(file_path)
                 
                 for endpoint in file_endpoints:
@@ -83,20 +69,12 @@ class EndpointExtractor:
         return endpoints
     
     def extract_endpoints_from_file(self, file_path: Path) -> List[ApiEndpoint]:
-        """从单个文件提取接口"""
+        """从Java文件提取接口"""
         content = file_path.read_text(encoding='utf-8', errors='ignore')
         
-        # 根据文件扩展名选择提取策略
-        suffix = file_path.suffix.lower()
-        
-        if suffix == '.java':
+        # 只处理Java文件
+        if file_path.suffix.lower() == '.java':
             return self._extract_spring_endpoints(content, file_path)
-        elif suffix == '.py':
-            return self._extract_python_endpoints(content, file_path)
-        elif suffix == '.go':
-            return self._extract_go_endpoints(content, file_path)
-        elif suffix in ('.js', '.ts'):
-            return self._extract_js_endpoints(content, file_path)
         else:
             return []
     
@@ -178,139 +156,6 @@ class EndpointExtractor:
             endpoints.append(endpoint)
             i += 1
             
-        return endpoints
-    
-    def _extract_python_endpoints(self, content: str, file_path: Path) -> List[ApiEndpoint]:
-        """提取Python Flask/Django接口"""
-        endpoints = []
-        lines = content.split('\n')
-        
-        # 尝试Flask风格
-        for i, line in enumerate(lines):
-            # Flask路由
-            flask_match = re.search(self.patterns["flask"]["route"], line)
-            if flask_match:
-                path = flask_match.group(1)
-                method_name = flask_match.group(2)
-                
-                # 查找HTTP方法
-                http_method = "GET"  # 默认
-                method_match = re.search(self.patterns["flask"]["method"], line)
-                if method_match:
-                    http_method = method_match.group(1)
-                
-                # 查找函数定义
-                func_match = None
-                for j in range(i + 1, len(lines)):
-                    if f"def {method_name}" in lines[j]:
-                        func_match = re.search(r'def\s+(\w+)', lines[j])
-                        break
-                
-                if func_match:
-                    endpoint = ApiEndpoint(
-                        name=method_name,
-                        path=path,
-                        method=http_method,
-                        controller=file_path.stem,
-                        handler=method_name,
-                        file_path=str(file_path),
-                        line_number=i + 1,
-                        framework="flask"
-                    )
-                    endpoints.append(endpoint)
-        
-        # 尝试Django风格
-        for i, line in enumerate(lines):
-            django_match = re.search(self.patterns["django"]["url"], line)
-            if django_match:
-                path = django_match.group(1)
-                view_ref = django_match.group(2).strip()
-                
-                # 解析视图函数/类
-                if '.as_view()' in view_ref:
-                    # 类视图
-                    view_name = view_ref.split('.as_view')[0].split('.')[-1]
-                else:
-                    # 函数视图
-                    view_name = view_ref
-                
-                endpoint = ApiEndpoint(
-                    name=view_name,
-                    path=path,
-                        method="GET",  # Django需要进一步分析
-                    controller=file_path.stem,
-                    handler=view_name,
-                    file_path=str(file_path),
-                    line_number=i + 1,
-                    framework="django"
-                )
-                endpoints.append(endpoint)
-        
-        return endpoints
-    
-    def _extract_go_endpoints(self, content: str, file_path: Path) -> List[ApiEndpoint]:
-        """提取Go Gin接口"""
-        endpoints = []
-        
-        gin_matches = re.finditer(self.patterns["gin"]["route"], content)
-        
-        for match in gin_matches:
-            http_method = match.group(1)
-            path = match.group(2)
-            handler = match.group(3)
-            
-            # 查找handler函数定义
-            func_pattern = rf'func\s+{handler}\s*\([^)]*\)'
-            func_match = re.search(func_pattern, content)
-            line_number = 1
-            
-            if func_match:
-                # 粗略估计行号
-                line_number = content[:func_match.start()].count('\n') + 1
-            
-            endpoint = ApiEndpoint(
-                name=handler,
-                path=path,
-                method=http_method,
-                controller=file_path.stem,
-                handler=handler,
-                file_path=str(file_path),
-                line_number=line_number,
-                framework="gin"
-            )
-            endpoints.append(endpoint)
-        
-        return endpoints
-    
-    def _extract_js_endpoints(self, content: str, file_path: Path) -> List[ApiEndpoint]:
-        """提取JavaScript/TypeScript接口（Express/Koa）"""
-        endpoints = []
-        
-        # Express.js模式
-        express_patterns = [
-            r'\.(get|post|put|delete|patch)\(["\']([^"\']+)["\'][^,]*,\s*(?:async\s*)?(?:function\s*)?(\w+)\s*\(',
-            r'\.(get|post|put|delete|patch)\(["\']([^"\']+)["\'][^,]*,\s*\([^)]*\)\s*=>'
-        ]
-        
-        for pattern in express_patterns:
-            matches = re.finditer(pattern, content, re.DOTALL)
-            for match in matches:
-                http_method = match.group(1).upper()
-                path = match.group(2)
-                handler = match.group(3) if len(match.groups()) > 2 else "anonymous"
-                
-                endpoint = ApiEndpoint(
-                    name=handler,
-                    path=path,
-                    method=http_method,
-                    controller=file_path.stem,
-                    handler=handler,
-                    file_path=str(file_path),
-                    line_number=1,  # 简化处理
-                    framework="express"
-                )
-                endpoints.append(endpoint)
-        
         return endpoints
     
     def _get_http_method_from_annotation(self, annotation: str, line: str = "") -> str:

@@ -1,30 +1,25 @@
-# 单项目接口分析功能
+# Java项目接口分析工具
 
-## 概述
+专注于Java Spring Boot项目的接口分析工具，提供深度的调用链分析和接口结构解析。
 
-新增的单项目分析功能允许你只分析一个项目的接口结构，而不需要进行新旧项目的对比。这对于以下场景特别有用：
+## 🚀 主要功能
 
-- 了解现有项目的接口结构
-- 评估项目的复杂度
-- 生成接口文档
-- 代码审查和重构准备
-
-## 使用方法
-
-### 1. 单项目分析
+### 单项目分析
+分析Java Spring Boot项目的接口结构，生成详细的分析报告。
 
 ```bash
-# 分析单个项目
-python main.py --single /path/to/your/project
+# 分析单个Java项目
+python main.py --single /path/to/your/java/project
 
 # 显示详细信息
-python main.py --single /path/to/your/project --verbose
+python main.py --single /path/to/your/java/project --verbose
 
 # 自定义输出目录
-python main.py --single /path/to/your/project --output ./my_analysis
+python main.py --single /path/to/your/java/project --output ./my_analysis
 ```
 
-### 2. 接口详情查看 (新功能)
+### 接口详情查看
+查看特定接口的详细信息和源代码。
 
 ```bash
 # 查看特定接口的详细信息
@@ -44,7 +39,16 @@ python main.py --show-endpoint "category/page"
 - 🗄️ 显示SQL映射信息
 - 📝 自动定位并显示源代码片段
 
-### 3. 迁移分析（原功能）
+### 深度调用链分析
+生成接口的深度调用链树，分析方法调用关系。
+
+```bash
+# 生成调用链树
+python main.py --call-tree "/admin/category/page"
+```
+
+### 迁移分析
+对比新旧Java项目的接口差异，辅助系统迁移。
 
 ```bash
 # 基本迁移分析
@@ -54,179 +58,141 @@ python main.py --migrate --old /path/to/old --new /path/to/new
 python main.py --migrate --old /path/to/old --new /path/to/new --verbose
 ```
 
-### 参数说明
+## 📋 输出文件
 
-#### 必需参数
-- `--single PROJECT_PATH`: 指定要分析的项目路径
+分析完成后，工具会在输出目录生成以下文件：
 
-#### 可选参数
-- `--output DIR`: 输出目录（默认：./migration_output）
-- `--verbose, -v`: 显示详细分析信息
-- `--model MODEL`: AI模型名称（默认：gpt-3.5-turbo）
-- `--api-key KEY`: OpenAI API密钥（单项目模式通常不需要）
+- `endpoints.json` - 所有接口的详细信息
+- `endpoint_analysis.json` - 完整的分析结果数据
+- `analysis_report.md` - 人类可读的分析报告
+- `call_tree_*.md` - 接口调用链树（使用--call-tree时生成）
 
-### 示例
+## 🛠️ 快速开始
+
+### 分析示例项目
 
 ```bash
 # 分析测试项目
-python main_single.py --single test_projects/new_project --verbose
+python main.py --single test_projects/sc_pcc_business --verbose
 
 # 分析实际项目
-python main_single.py --single /home/user/my-spring-project --output ./analysis_results
+python main.py --single /home/user/my-spring-project --output ./analysis_results
 ```
 
-## 输出结果
+## 🔧 安装依赖
 
-单项目分析会生成以下文件：
-
-### 1. endpoints.json
-包含所有提取的接口信息：
-```json
-[
-  {
-    "name": "NewUserController.getAllUsers",
-    "path": "/api/users/getAll",
-    "method": "GET",
-    "controller": "NewUserController",
-    "handler": "getAllUsers",
-    "file_path": "test_projects\\new_project\\NewUserController.java",
-    "line_number": 9,
-    "framework": "spring"
-  }
-]
+```bash
+pip install javalang
 ```
 
-### 2. endpoint_analysis.json
-包含详细的分析结果：
-```json
-[
-  {
-    "endpoint": { /* 接口信息 */ },
-    "call_chain": {
-      "method_calls": [
-        {"object": "Response", "method": "success"},
-        {"object": "userService", "method": "getAllUsers"}
-      ],
-      "sql_statements": [],
-      "files": []
-    },
-    "sql_mappings": [],
-    "complexity_score": 2
-  }
-]
-```
-
-### 3. analysis_report.md
-人类可读的分析报告，包含：
-- 统计概览（总接口数、复杂接口数等）
-- 接口详情列表
-- 复杂度评估
-
-## 分析功能
+## 📊 功能特性
 
 ### 接口提取
-- 自动识别Spring Boot、Flask、Django、Express等框架
+- 自动识别Spring Boot框架
 - 提取接口路径、HTTP方法、处理函数等信息
-- 支持多种编程语言（Java、Python、Go、JavaScript/TypeScript）
+- 支持Java项目分析
 
 ### 调用链分析
-- 分析接口内部的方法调用
-- 识别Service、DAO等依赖关系
-- 提取SQL语句（如果存在）
+- 深度分析方法调用关系
+- 识别Service、DAO等依赖
+- 提取SQL映射信息
+- 计算接口复杂度
 
-### 复杂度评估
-复杂度得分基于以下因素：
-- 方法调用数量（每个调用 +1 分）
-- SQL语句数量（每个语句 +2 分）
-- SQL映射文件数量（每个文件 +3 分）
-- 相关文件数量（每个文件 +1 分）
+### 支持的Java框架
 
-### 支持的框架
-
-#### Java
-- Spring Boot (RestController, RequestMapping等注解)
+#### Spring Boot
 - Spring MVC
+- Spring WebFlux
+- REST Controller
 
-#### Python
-- Flask (@app.route装饰器)
-- Django (URL配置)
+## 💡 使用场景
 
-#### Go
-- Gin框架
-
-#### JavaScript/TypeScript
-- Express.js
-- 基本的路由定义
-
-## 与迁移模式的区别
-
-| 功能 | 单项目模式 | 迁移模式 |
-|------|------------|----------|
-| 项目数量 | 1个 | 2个（新旧对比） |
-| 接口匹配 | 无 | 有 |
-| AI代码生成 | 无 | 有（可选） |
-| 复杂度分析 | 有 | 有 |
-| 调用链分析 | 有 | 有 |
-| 输出报告 | 简化版 | 完整版 |
-
-## 使用场景
-
-### 1. 项目评估
+### 代码审查
 ```bash
 # 评估项目复杂度，为重构做准备
-python main_single.py --single /path/to/legacy/project --verbose
+python main.py --single /path/to/legacy/project --verbose
 ```
 
-### 2. 接口文档生成
+### 文档生成
 ```bash
 # 生成接口清单和分析报告
-python main_single.py --single /path/to/api/project --output ./api_docs
+python main.py --single /path/to/api/project --output ./api_docs
 ```
 
-### 3. 代码审查
+### 代码重构
 ```bash
 # 分析接口结构，识别复杂的接口
-python main_single.py --single /path/to/review/project --verbose
+python main.py --single /path/to/review/project --verbose
 ```
 
-### 4. 技术债务评估
+### 技术债务分析
 ```bash
 # 识别高复杂度接口，优先重构
-python main_single.py --single /path/to/project --output ./tech_debt_analysis
+python main.py --single /path/to/project --output ./tech_debt_analysis
 ```
 
-## 注意事项
+## 📈 分析报告示例
 
-1. **文件编码**: 确保项目文件使用UTF-8编码
-2. **框架支持**: 目前支持主流框架，如需支持其他框架可扩展
-3. **大型项目**: 对于非常大的项目，分析可能需要一些时间
-4. **路径格式**: 使用正斜杠或反斜杠都可以，工具会自动处理
+工具会生成包含以下信息的详细报告：
 
-## 故障排除
+- 📊 项目统计信息（接口数量、复杂度分布）
+- 🔗 接口列表（按复杂度排序）
+- 📁 文件结构分析
+- 🗄️ SQL映射统计
+- ⚡ 性能建议
 
-### 常见问题
+## 🎯 高级功能
 
-1. **没有找到接口**
-   - 检查项目路径是否正确
-   - 确认项目使用支持的框架
-   - 查看控制器文件是否包含正确的注解
-
-2. **路径解析错误**
-   - 检查注解格式是否标准
-   - 确认字符串引号使用正确
-
-3. **编码问题**
-   - 确保文件使用UTF-8编码
-   - 检查文件是否包含特殊字符
-
-### 调试模式
+### 详细模式
 
 使用 `--verbose` 参数可以看到详细的分析过程：
 ```bash
-python main_single.py --single your_project --verbose
+python main.py --single your_project --verbose
 ```
 
-这会显示：
-- 每个接口的详细信息
-- 调用链分析结果
-- 复杂度计算过程
+### 调用链树生成
+
+生成特定接口的深度调用链分析：
+```bash
+# 先分析项目生成数据
+python main.py --single /path/to/project --output ./output
+
+# 生成调用链树
+python main.py --call-tree /api/endpoint/path --output ./output
+```
+
+## 🔍 示例输出
+
+### 接口列表示例
+```
+📊 接口复杂度统计:
+- 简单接口 (1-5个调用): 12个
+- 中等接口 (6-15个调用): 8个  
+- 复杂接口 (16+个调用): 3个
+
+🔗 复杂度最高的接口:
+1. POST /admin/employee/login (复杂度: 23)
+2. GET /admin/category/page (复杂度: 18)
+3. POST /admin/dish/save (复杂度: 15)
+```
+
+### 调用链树示例
+```
+📁 merge() - 主方法
+  ├── ServiceResult.ServiceResult() [构造] - 0个参数 (行:42)
+  ├── MapUtils.getString() [静态] - 2个参数 (行:44)
+  ├── StringUtils.isNullOrBlank() [静态] - 1个参数 (行:45)
+  ├── result.setRSP() [链式] - 1个参数 (行:46)
+  ├── sheetMergeService.merge() - 3个参数 (行:60)
+```
+
+## 📝 注意事项
+
+- 目前只支持Java Spring Boot项目
+- 需要安装javalang依赖包
+- 建议在项目根目录运行分析
+- 大型项目分析可能需要较长时间
+
+## 🤝 贡献
+
+欢迎提交Issue和Pull Request来改进这个工具！
