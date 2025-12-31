@@ -292,6 +292,9 @@ class ASTDeepCallChainAnalyzer:
         
         # 查找项目中的实现
         if object_name:
+            # Spring Service变量名到接口名的映射
+            service_class_name = self._resolve_service_class_name_ast(object_name, current_file)
+            
             # 查找直接的类实现
             class_file = self._find_file_by_name(f"{object_name}.java")
             if class_file:
@@ -300,6 +303,39 @@ class ASTDeepCallChainAnalyzer:
                     "class": object_name,
                     "type": "concrete"
                 })
+            
+            # 处理Service变量名映射
+            if service_class_name:
+                # 查找Service接口
+                service_interface_file = self._find_file_by_name(f"{service_class_name}.java")
+                if service_interface_file:
+                    implementations.append({
+                        "file": service_interface_file,
+                        "class": service_class_name,
+                        "type": "service_interface"
+                    })
+                
+                # 查找ServiceImpl实现类
+                impl_class_name = service_class_name + "Impl"
+                impl_file = self._find_file_by_name(f"{impl_class_name}.java")
+                if impl_file:
+                    implementations.append({
+                        "file": impl_file,
+                        "class": impl_class_name,
+                        "type": "service_implementation"
+                    })
+            
+            # 通用Service接口处理
+            if object_name.endswith("Service"):
+                # 查找对应的ServiceImpl实现类
+                impl_class_name = object_name + "Impl"
+                impl_file = self._find_file_by_name(f"{impl_class_name}.java")
+                if impl_file:
+                    implementations.append({
+                        "file": impl_file,
+                        "class": impl_class_name,
+                        "type": "service_implementation"
+                    })
             
             # 查找接口的所有实现
             if object_name in self.interface_implementations:
@@ -319,6 +355,45 @@ class ASTDeepCallChainAnalyzer:
             })
         
         return implementations
+    
+    def _resolve_service_class_name_ast(self, variable_name: str, current_file: str) -> Optional[str]:
+        """根据变量名解析Service类名 - AST版本"""
+        # 常见的Spring Service变量名模式
+        service_mappings = {
+            "adminService": "UmsAdminService",
+            "roleService": "UmsRoleService", 
+            "userService": "UmsUserService",
+            "menuService": "UmsMenuService",
+            "resourceService": "UmsResourceService",
+            "sheetMergeService": "SheetMergeService",  # 添加这个映射
+        }
+        
+        # 直接映射
+        if variable_name in service_mappings:
+            return service_mappings[variable_name]
+        
+        # 模式匹配：xxxService -> XxxService
+        if variable_name.endswith("Service"):
+            # 将首字母大写
+            class_name = variable_name[0].upper() + variable_name[1:]
+            return class_name
+        
+        # 尝试从当前文件中解析@Autowired注解
+        try:
+            with open(current_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # 查找@Autowired private XxxService xxxService;
+            import re
+            pattern = rf'@Autowired\s+(?:private\s+)?(\w+(?:Service|ServiceImpl))\s+{re.escape(variable_name)}\s*;'
+            match = re.search(pattern, content)
+            if match:
+                return match.group(1)
+                
+        except Exception:
+            pass
+        
+        return None
     
     def _is_java_standard_library(self, class_name: str) -> bool:
         """判断是否是Java标准库类"""
@@ -1233,11 +1308,24 @@ def _generate_call_tree_md(endpoint_data: Dict, output_dir: str, parse_method: s
     # 尝试找到项目根目录
     path_parts = file_path.split(os.sep)
     for i, part in enumerate(path_parts):
-        if part in ['src', 'main', 'java']:
-            project_root = os.sep.join(path_parts[:i-2]) if i >= 2 else os.sep.join(path_parts[:i])
+        if part == 'src':
+            # 找到src目录，项目根目录就是src的上一级
+            project_root = os.sep.join(path_parts[:i])
             break
     
     if not project_root:
+        # 如果没找到src目录，尝试其他方式
+        for i, part in enumerate(path_parts):
+            if part in ['main', 'java']:
+                project_root = os.sep.join(path_parts[:max(0, i-2)])
+                break
+    
+    if not project_root:
+        # 最后的备选方案
+        project_root = os.path.dirname(os.path.dirname(file_path))
+    
+    # 确保项目根目录存在
+    if not os.path.exists(project_root):
         project_root = os.path.dirname(file_path)
     
     print(f"� 开始深度分:析接口: {endpoint['name']}")
