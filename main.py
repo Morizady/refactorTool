@@ -17,6 +17,7 @@ from sql_mapper_analyzer import SQLMapperAnalyzer
 from ai_generator import AIGenerator
 from ast_deep_call_chain_analyzer import ASTDeepCallChainAnalyzer
 from deep_call_chain_analyzer import DeepCallChainAnalyzer
+from jdt_call_chain_analyzer import JDTDeepCallChainAnalyzer
 
 def generate_call_tree(endpoint_path: str, output_dir: str = "./migration_output", parse_method: str = "regex", max_depth: int = 4):
     """生成指定接口的深度调用链树"""
@@ -78,7 +79,104 @@ def generate_call_tree(endpoint_path: str, output_dir: str = "./migration_output
     
     # 生成调用树
     print("🌳 开始生成深度调用链树...")
-    _generate_call_tree_md(selected_endpoint, output_dir, parse_method, max_depth)
+    
+    # 使用新的JDT深度分析器
+    if parse_method == "jdt":
+        _generate_jdt_call_tree(selected_endpoint, output_dir, max_depth)
+    else:
+        _generate_call_tree_md(selected_endpoint, output_dir, parse_method, max_depth)
+
+def _generate_jdt_call_tree(endpoint_data: Dict, output_dir: str, max_depth: int = 6):
+    """使用JDT生成深度调用树"""
+    endpoint = endpoint_data['endpoint']
+    
+    # 确定项目根目录
+    file_path = endpoint['file_path']
+    project_root = None
+    
+    print("📁 正在确定项目根目录...")
+    # 尝试找到项目根目录
+    path_parts = file_path.split(os.sep)
+    for i, part in enumerate(path_parts):
+        if part == 'src':
+            # 找到src目录，项目根目录就是src的上一级
+            project_root = os.sep.join(path_parts[:i])
+            break
+    
+    if not project_root:
+        # 如果没找到src目录，尝试其他方式
+        for i, part in enumerate(path_parts):
+            if part in ['main', 'java']:
+                project_root = os.sep.join(path_parts[:max(0, i-2)])
+                break
+    
+    if not project_root:
+        # 最后的备选方案
+        project_root = os.path.dirname(os.path.dirname(file_path))
+    
+    # 确保项目根目录存在
+    if not os.path.exists(project_root):
+        project_root = os.path.dirname(file_path)
+    
+    print(f"🏗️ 开始JDT深度分析接口: {endpoint['name']}")
+    print(f"📁 项目根目录: {project_root}")
+    print(f"📊 使用解析方法: JDT")
+    
+    try:
+        # 初始化JDT深度分析器
+        from jdt_call_chain_analyzer import JDTDeepCallChainAnalyzer
+        analyzer = JDTDeepCallChainAnalyzer(project_root)
+        
+        # 分析深度调用树
+        print(f"🚀 开始分析主方法: {endpoint['handler']}")
+        print("=" * 60)
+        
+        call_tree = analyzer.analyze_deep_call_tree(
+            file_path, 
+            endpoint['handler'],
+            max_depth=max_depth
+        )
+        
+        print("=" * 60)
+        
+        if call_tree:
+            # 生成报告
+            print("📝 正在生成深度调用树报告...")
+            endpoint_path = f"{endpoint['method']} {endpoint['path']}"
+            report_file = analyzer.generate_call_tree_report(call_tree, endpoint_path, output_dir)
+            
+            print(f"✅ JDT深度调用树已生成: {report_file}")
+            
+            # 显示统计信息
+            total_calls = analyzer._count_total_calls(call_tree)
+            max_depth_actual = analyzer._get_max_depth(call_tree)
+            unique_classes = analyzer._count_unique_classes(call_tree)
+            mapping_count = len(analyzer.method_mappings)
+            
+            print(f"📊 分析统计:")
+            print(f"  - 解析方法: JDT (Eclipse JDT)")
+            print(f"  - 总调用数: {total_calls}")
+            print(f"  - 最大深度: {max_depth_actual}")
+            print(f"  - 涉及类数: {unique_classes}")
+            print(f"  - 方法映射数: {mapping_count}")
+            
+            # 显示部分方法映射示例
+            if analyzer.method_mappings:
+                print(f"\n📋 方法映射示例:")
+                for i, mapping in enumerate(analyzer.method_mappings[:3], 1):
+                    print(f"  {i}. {mapping.interface_call} -> {mapping.implementation_call}")
+                if len(analyzer.method_mappings) > 3:
+                    print(f"  ... 还有 {len(analyzer.method_mappings) - 3} 个映射")
+        else:
+            print("❌ JDT深度调用树分析失败")
+        
+        # 关闭分析器
+        analyzer.shutdown()
+        
+    except Exception as e:
+        print(f"❌ JDT分析失败: {e}")
+        import traceback
+        traceback.print_exc()
 
 def _generate_call_tree_md(endpoint_data: Dict, output_dir: str, parse_method: str = "regex", max_depth: int = 4):
     """生成调用树的Markdown文件"""
@@ -118,7 +216,10 @@ def _generate_call_tree_md(endpoint_data: Dict, output_dir: str, parse_method: s
     print(f"📊 使用解析方法: {parse_method.upper()}")
     
     # 根据解析方法选择分析器
-    if parse_method == "ast":
+    if parse_method == "jdt":
+        print("🏗️  正在初始化JDT深度分析器...")
+        analyzer = JDTDeepCallChainAnalyzer(project_root)
+    elif parse_method == "ast":
         print("🏗️  正在初始化AST深度分析器...")
         analyzer = ASTDeepCallChainAnalyzer(project_root)
     else:
@@ -1210,8 +1311,8 @@ def main():
     mode_group.add_argument('--call-tree', metavar='ENDPOINT_PATH', help='生成特定接口的深度调用链树，如：/user/user/login')
     
     # 解析方法选择参数
-    parser.add_argument('--parse-method', choices=['regex', 'ast'], default='regex', 
-                       help='选择代码解析方法: regex(正则表达式,默认) 或 ast(语法树解析)')
+    parser.add_argument('--parse-method', choices=['regex', 'ast', 'jdt'], default='regex', 
+                       help='选择代码解析方法: regex(正则表达式,默认), ast(javalang语法树解析) 或 jdt(Eclipse JDT精确解析,推荐)')
     parser.add_argument('--max-depth', type=int, default=4, 
                        help='深度调用链分析的最大深度 (默认: 4)')
     

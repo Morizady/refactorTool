@@ -1,0 +1,106 @@
+# Java项目分析工具配置文件
+# 使用JPype调用Eclipse JDT进行精确的Java代码解析
+
+# Java环境配置
+java:
+  # Java安装路径 - 请根据您的系统修改
+  # Windows示例: "C:/Program Files/Java/jdk-11.0.16"
+  # Linux示例: "/usr/lib/jvm/java-11-openjdk"
+  # macOS示例: "/Library/Java/JavaVirtualMachines/jdk-11.0.16.jdk/Contents/Home"
+  java_home: "D:/Program Files/Java/jdk-1.8"
+  
+  # JVM启动参数
+  jvm_args:
+    - "-Xmx2g"  # 最大堆内存
+    - "-Xms512m"  # 初始堆内存
+    - "-Dfile.encoding=UTF-8"  # 文件编码
+  
+  # JDT Core JAR文件路径 - 将自动下载到此目录
+  jdt_lib_dir: "./lib/jdt"
+  
+  # JDT版本配置
+  jdt_version: "3.13.0"
+  
+  # 是否自动下载JDT依赖
+  auto_download_jdt: true
+  
+  # 是否自动下载JDT依赖
+  auto_download_jdt: true
+
+# 项目解析配置
+parsing:
+  # 解析方法: "jdt" (推荐) 或 "javalang" (备用)
+  method: "jdt"
+  
+  # 源代码编码
+  source_encoding: "UTF-8"
+  
+  # Java版本兼容性
+  java_version: "11"
+  
+  # 是否解析测试代码
+  include_tests: false
+  
+  # 排除的目录模式
+  exclude_patterns:
+    - "target/**"
+    - "build/**"
+    - ".git/**"
+    - "node_modules/**"
+    - "**/.idea/**"
+    - "**/test/**"  # 如果include_tests为false
+
+# 分析配置
+analysis:
+  # 最大调用链深度
+  max_call_depth: 6
+  
+  # 是否分析接口实现
+  analyze_interfaces: true
+  
+  # 是否分析继承关系
+  analyze_inheritance: true
+  
+  # 是否缓存解析结果
+  enable_cache: true
+  
+  # 缓存目录
+  cache_dir: "./cache"
+
+# 输出配置
+output:
+  # 输出目录
+  dir: "./migration_output"
+  
+  # 输出格式
+  formats:
+    - "json"
+    - "markdown"
+  
+  # 是否生成详细报告
+  detailed_reports: true
+  
+  # 是否包含源代码片段
+  include_source_snippets: true
+
+# 日志配置
+logging:
+  # 日志级别: DEBUG, INFO, WARNING, ERROR
+  level: "INFO"
+  
+  # 日志文件
+  file: "./logs/java_analyzer.log"
+  
+  # 是否在控制台显示日志
+  console: true
+
+# 性能配置
+performance:
+  # 并发线程数
+  max_threads: 4
+  
+  # 单个文件最大大小 (MB)
+  max_file_size: 10
+  
+  # 解析超时时间 (秒)
+  parse_timeout: 30

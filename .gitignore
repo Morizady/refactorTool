@@ -5,3 +5,14 @@
 *migration_output*
 *.vscode*
 test_*py
+# JDT相关文件
+lib/
+cache/
+logs/
+temp_test.java
+
+# JPype相关
+*.so
+*.dll
+*.dylib
+*test_output*
