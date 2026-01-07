@@ -15,14 +15,11 @@ from equivalence_matcher import EquivalenceMatcher
 from call_chain_analyzer import CallChainAnalyzer
 from sql_mapper_analyzer import SQLMapperAnalyzer
 from ai_generator import AIGenerator
-from ast_deep_call_chain_analyzer import ASTDeepCallChainAnalyzer
-from deep_call_chain_analyzer import DeepCallChainAnalyzer
 from jdt_call_chain_analyzer import JDTDeepCallChainAnalyzer
 
-def generate_call_tree(endpoint_path: str, output_dir: str = "./migration_output", parse_method: str = "regex", max_depth: int = 4):
+def generate_call_tree(endpoint_path: str, output_dir: str = "./migration_output", max_depth: int = 6):
     """生成指定接口的深度调用链树"""
     print(f"🚀 开始生成调用链树: {endpoint_path}")
-    print(f"📊 解析方法: {parse_method.upper()}")
     print(f"📏 最大深度: {max_depth}")
     
     analysis_file = f"{output_dir}/endpoint_analysis.json"
@@ -79,12 +76,7 @@ def generate_call_tree(endpoint_path: str, output_dir: str = "./migration_output
     
     # 生成调用树
     print("🌳 开始生成深度调用链树...")
-    
-    # 使用新的JDT深度分析器
-    if parse_method == "jdt":
-        _generate_jdt_call_tree(selected_endpoint, output_dir, max_depth)
-    else:
-        _generate_call_tree_md(selected_endpoint, output_dir, parse_method, max_depth)
+    _generate_jdt_call_tree(selected_endpoint, output_dir, max_depth)
 
 def _generate_jdt_call_tree(endpoint_data: Dict, output_dir: str, max_depth: int = 6):
     """使用JDT生成深度调用树"""
@@ -178,40 +170,77 @@ def _generate_jdt_call_tree(endpoint_data: Dict, output_dir: str, max_depth: int
         import traceback
         traceback.print_exc()
 
-def _generate_call_tree_md(endpoint_data: Dict, output_dir: str, parse_method: str = "regex", max_depth: int = 4):
-    """生成调用树的Markdown文件"""
+def show_endpoint_details(endpoint_path: str, output_dir: str = "./migration_output"):
+    """显示特定接口的代码和调用链"""
+    analysis_file = f"{output_dir}/endpoint_analysis.json"
+    
+    if not os.path.exists(analysis_file):
+        print(f"❌ 分析文件不存在: {analysis_file}")
+        print("请先运行单项目分析生成分析数据：")
+        print("python main.py --single /path/to/project")
+        return
+    
+    # 加载分析数据
+    try:
+        with open(analysis_file, 'r', encoding='utf-8') as f:
+            analysis_data = json.load(f)
+    except Exception as e:
+        print(f"❌ 读取分析文件失败: {e}")
+        return
+    
+    # 查找匹配的接口
+    matching_endpoints = []
+    for endpoint_data in analysis_data:
+        endpoint = endpoint_data['endpoint']
+        if endpoint_path in endpoint['path'] or endpoint_path == endpoint['path']:
+            matching_endpoints.append(endpoint_data)
+    
+    if not matching_endpoints:
+        print(f"❌ 未找到匹配的接口: {endpoint_path}")
+        print("\n可用的接口路径:")
+        for endpoint_data in analysis_data[:10]:
+            endpoint = endpoint_data['endpoint']
+            print(f"  - {endpoint['method']} {endpoint['path']}")
+        if len(analysis_data) > 10:
+            print(f"  ... 还有 {len(analysis_data) - 10} 个接口")
+        return
+    
+    # 显示匹配的接口
+    if len(matching_endpoints) > 1:
+        print(f"🔍 找到 {len(matching_endpoints)} 个匹配的接口:")
+        for i, endpoint_data in enumerate(matching_endpoints, 1):
+            endpoint = endpoint_data['endpoint']
+            print(f"{i}. {endpoint['method']} {endpoint['path']} - {endpoint['name']}")
+        
+        try:
+            choice = int(input("\n请选择要查看的接口 (输入序号): ")) - 1
+            if 0 <= choice < len(matching_endpoints):
+                selected_endpoint = matching_endpoints[choice]
+            else:
+                print("❌ 无效的选择")
+                return
+        except ValueError:
+            print("❌ 请输入有效的数字")
+            return
+    else:
+        selected_endpoint = matching_endpoints[0]
+    
+    # 显示接口详细信息
+    _display_endpoint_details(selected_endpoint)
+
+def _display_endpoint_details(endpoint_data: Dict):
+    """显示接口的详细信息"""
     endpoint = endpoint_data['endpoint']
     call_chain = endpoint_data['call_chain']
+    sql_mappings = endpoint_data.get('sql_mappings', [])
+    complexity_score = endpoint_data['complexity_score']
     
-    # 确定项目根目录
-    file_path = endpoint['file_path']
-    project_root = None
+    print(f"\n{'='*80}")
+    print(f"🔍 接口详细信息")
+    print(f"{'='*80}")
     
-    print("📁 正在确定项目根目录...")
-    # 尝试找到项目根目录
-    path_parts = file_path.split(os.sep)
-    for i, part in enumerate(path_parts):
-        if part == 'src':
-            # 找到src目录，项目根目录就是src的上一级
-            project_root = os.sep.join(path_parts[:i])
-            break
-    
-    if not project_root:
-        # 如果没找到src目录，尝试其他方式
-        for i, part in enumerate(path_parts):
-            if part in ['main', 'java']:
-                project_root = os.sep.join(path_parts[:max(0, i-2)])
-                break
-    
-    if not project_root:
-        # 最后的备选方案
-        project_root = os.path.dirname(os.path.dirname(file_path))
-    
-    # 确保项目根目录存在
-    if not os.path.exists(project_root):
-        project_root = os.path.dirname(file_path)
-    
-    print(f"� 开始深度分:析接口: {endpoint['name']}")
+    # 基本信息
+    print(f"📋 基本信息:")
     print(f"📁 项目根目录: {project_root}")
     print(f"📊 使用解析方法: {parse_method.upper()}")
     
@@ -1310,11 +1339,9 @@ def main():
     mode_group.add_argument('--show-endpoint', metavar='ENDPOINT_PATH', help='显示特定接口的代码和调用链，如：/admin/category/page')
     mode_group.add_argument('--call-tree', metavar='ENDPOINT_PATH', help='生成特定接口的深度调用链树，如：/user/user/login')
     
-    # 解析方法选择参数
-    parser.add_argument('--parse-method', choices=['regex', 'ast', 'jdt'], default='regex', 
-                       help='选择代码解析方法: regex(正则表达式,默认), ast(javalang语法树解析) 或 jdt(Eclipse JDT精确解析,推荐)')
-    parser.add_argument('--max-depth', type=int, default=4, 
-                       help='深度调用链分析的最大深度 (默认: 4)')
+    # 调用链分析参数
+    parser.add_argument('--max-depth', type=int, default=6, 
+                       help='深度调用链分析的最大深度 (默认: 6)')
     
     # 迁移模式参数
     parser.add_argument('--old', help='旧项目路径（迁移模式必需）')
@@ -1360,7 +1387,7 @@ def main():
         return
     else:  # 调用树生成模式
         # 直接调用调用树生成功能
-        generate_call_tree(args.call_tree, args.output, args.parse_method, args.max_depth)
+        generate_call_tree(args.call_tree, args.output, args.max_depth)
         return
     
     # 运行工具

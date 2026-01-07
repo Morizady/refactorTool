@@ -41,14 +41,8 @@ python main.py --single test_projects/sc_pcc_business --verbose
 ### 2. 生成调用链树
 
 ```bash
-# JDT 解析（推荐，最精确）
-python main.py --call-tree "/sheetmerge/merge" --parse-method jdt --max-depth 6
-
-# AST 语法树解析
-python main.py --call-tree "/sheetmerge/merge" --parse-method ast --max-depth 6
-
-# 正则表达式解析（默认，最快）
-python main.py --call-tree "/sheetmerge/merge" --parse-method regex --max-depth 4
+# 生成深度调用链树（使用 JDT 解析）
+python main.py --call-tree "/sheetmerge/merge" --max-depth 6
 ```
 
 ### 3. 查看接口详情
@@ -88,14 +82,6 @@ analyzer.shutdown()
 ```bash
 python test_jdt_deep_analysis.py
 ```
-
-## 解析方法对比
-
-| 方法 | 精确度 | 速度 | 适用场景 |
-|------|--------|------|----------|
-| jdt | 极高 | 中等 | 精确分析，生产环境 |
-| ast | 高 | 中等 | 一般分析 |
-| regex | 中等 | 快 | 快速扫描，大型项目 |
 
 ## 输出文件
 
@@ -154,7 +140,6 @@ performance:
 | `--single <path>` | 分析单个项目 |
 | `--call-tree <endpoint>` | 生成调用链树 |
 | `--show-endpoint <path>` | 查看接口详情 |
-| `--parse-method <method>` | 解析方法: jdt/ast/regex |
-| `--max-depth <n>` | 最大分析深度 (默认 4) |
+| `--max-depth <n>` | 最大分析深度 (默认 6) |
 | `--output <dir>` | 输出目录 |
 | `--verbose` | 详细输出 |
