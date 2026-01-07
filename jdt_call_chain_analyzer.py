@@ -26,6 +26,7 @@ class MethodMapping:
     call_type: str  # 调用类型：direct, interface, inheritance, polymorphic
     line_number: int  # 调用行号
     file_path: str  # 调用文件路径
+    resolved_type: str = ""  # JDT解析出的实际类型
 
 @dataclass
 class CallTreeNode:
@@ -45,7 +46,7 @@ class CallTreeNode:
 class JDTDeepCallChainAnalyzer:
     """基于JDT的深度调用链分析器 - 增强版"""
     
-    def __init__(self, project_root: str, config_path: str = "config.yml"):
+    def __init__(self, project_root: str, config_path: str = "config.yml", ignore_methods_file: str = "igonre_method.txt", show_getters_setters: bool = True, show_constructors: bool = True):
         self.project_root = Path(project_root)
         self.jdt_parser = JDTParser(config_path)
         self.analyzed_methods = set()  # 避免循环分析
@@ -55,9 +56,164 @@ class JDTDeepCallChainAnalyzer:
         self.package_imports = {}  # 包导入映射
         self.method_mappings = []  # 方法映射记录
         self.call_tree_cache = {}  # 调用树缓存
+        self.ignore_methods = set()  # 忽略的方法名列表
+        self.show_getters_setters = show_getters_setters  # 是否显示getter/setter方法
+        self.show_constructors = show_constructors  # 是否显示构造函数
+        
+        # 加载忽略方法列表
+        self._load_ignore_methods(ignore_methods_file)
         
         # 初始化JDT并解析项目
         self._initialize_project()
+    
+    def _is_simple_getter_or_setter(self, method_name: str, class_name: str, current_file: str) -> bool:
+        """
+        判断方法是否是简单的getter或setter方法
+        简单getter/setter的特征：方法内部没有其他方法调用（只是return field或field = value）
+        """
+        if not method_name:
+            return False
+        
+        # 首先检查方法名是否符合getter/setter模式
+        is_getter_pattern = False
+        is_setter_pattern = False
+        
+        if len(method_name) > 3:
+            if method_name.startswith('get') and method_name[3].isupper():
+                is_getter_pattern = True
+            if method_name.startswith('set') and method_name[3].isupper():
+                is_setter_pattern = True
+        if len(method_name) > 2:
+            if method_name.startswith('is') and method_name[2].isupper():
+                is_getter_pattern = True
+        
+        # 如果方法名不符合getter/setter模式，直接返回False
+        if not is_getter_pattern and not is_setter_pattern:
+            return False
+        
+        # 查找该方法，检查是否有子调用
+        java_class = self._find_class_by_name(class_name, current_file)
+        if not java_class:
+            # 如果找不到类（外部类），假设是简单getter/setter
+            return True
+        
+        for method in java_class.methods:
+            if method.name == method_name:
+                # 如果方法内部没有方法调用，则认为是简单getter/setter
+                if not method.method_calls or len(method.method_calls) == 0:
+                    return True
+                # 如果只有很少的调用（比如日志），也可能是getter/setter
+                # 但为了安全起见，只要有调用就认为不是简单getter/setter
+                return False
+        
+        # 如果找不到方法定义（可能是继承的），假设是简单getter/setter
+        return True
+    
+    def _filter_chain_calls(self, children: list) -> list:
+        """
+        过滤链式调用，只保留最长的调用链
+        例如：wapper.eq().eq().orderBy().last() 和 wapper.eq().eq().orderBy() 和 wapper.eq().eq() 和 wapper.eq()
+        只保留最长的 wapper.eq().eq().orderBy().last()
+        """
+        if not children:
+            return children
+        
+        # 分离链式调用和非链式调用
+        chain_calls = []  # [(child_node, mapping, full_call_str)]
+        non_chain_calls = []
+        
+        for child_node, mapping in children:
+            # 构建完整的调用字符串
+            full_call = f"{child_node.class_name}.{child_node.method_name}()"
+            
+            # 检查是否是链式调用（class_name中包含点号或括号）
+            if child_node.call_type == "chain_call" or '.' in child_node.class_name or '(' in child_node.class_name:
+                chain_calls.append((child_node, mapping, full_call))
+            else:
+                non_chain_calls.append((child_node, mapping))
+        
+        # 对链式调用进行去重，只保留最长的
+        filtered_chain_calls = []
+        
+        # 按调用字符串长度降序排序
+        chain_calls.sort(key=lambda x: len(x[2]), reverse=True)
+        
+        # 记录已经被包含的较短调用
+        covered_calls = set()
+        
+        for child_node, mapping, full_call in chain_calls:
+            # 检查这个调用是否是某个更长调用的子串
+            is_substring = False
+            for covered in covered_calls:
+                # 检查当前调用是否是已覆盖调用的前缀部分
+                # 例如 "wapper.eq().eq()" 是 "wapper.eq().eq().orderBy()" 的前缀
+                if self._is_chain_prefix(full_call, covered):
+                    is_substring = True
+                    break
+            
+            if not is_substring:
+                filtered_chain_calls.append((child_node, mapping))
+                covered_calls.add(full_call)
+        
+        # 合并结果
+        return non_chain_calls + filtered_chain_calls
+    
+    def _is_chain_prefix(self, shorter: str, longer: str) -> bool:
+        """
+        检查shorter是否是longer的链式调用前缀
+        例如：wapper.eq() 是 wapper.eq().eq() 的前缀
+        """
+        if shorter == longer:
+            return False
+        
+        # 移除末尾的()进行比较
+        shorter_base = shorter.rstrip('()')
+        longer_base = longer.rstrip('()')
+        
+        # 检查shorter_base是否是longer_base的前缀，且后面跟着.或()
+        if longer_base.startswith(shorter_base):
+            remaining = longer_base[len(shorter_base):]
+            # 剩余部分应该以.开头（表示链式调用继续）
+            if remaining.startswith('.') or remaining.startswith('()'):
+                return True
+        
+        return False
+    
+    def _load_ignore_methods(self, ignore_methods_file: str):
+        """加载忽略方法列表"""
+        try:
+            if os.path.exists(ignore_methods_file):
+                with open(ignore_methods_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        method_name = line.strip()
+                        if method_name and not method_name.startswith('#'):
+                            self.ignore_methods.add(method_name)
+                logger.info(f"✅ 加载忽略方法列表: {len(self.ignore_methods)} 个方法")
+            else:
+                logger.info(f"⚠️ 忽略方法文件不存在: {ignore_methods_file}")
+        except Exception as e:
+            logger.warning(f"加载忽略方法列表失败: {e}")
+    
+    def _should_ignore_method(self, method_name: str, class_name: str = "", current_file: str = "", call_type: str = "") -> bool:
+        """
+        检查方法是否应该被忽略
+        
+        Args:
+            method_name: 方法名
+            class_name: 类名（用于判断是否是简单getter/setter）
+            current_file: 当前文件路径（用于查找类定义）
+            call_type: 调用类型（用于判断是否是构造函数）
+        """
+        # 检查是否在忽略列表中
+        if method_name in self.ignore_methods:
+            return True
+        # 如果配置不显示构造函数，检查是否是构造函数调用
+        if not self.show_constructors and (call_type == "constructor" or method_name == "<init>"):
+            return True
+        # 如果配置不显示getter/setter，检查是否是简单的getter/setter方法
+        if not self.show_getters_setters and self._is_simple_getter_or_setter(method_name, class_name, current_file):
+            return True
+        return False
     
     def _initialize_project(self):
         """初始化项目分析"""
@@ -250,6 +406,9 @@ class JDTDeepCallChainAnalyzer:
         """构建包导入映射"""
         logger.info("🔍 构建包导入映射...")
         
+        self.static_imports = {}  # 静态导入映射: {file_path: {method_name: full_class_path}}
+        self.import_line_numbers = {}  # import语句行号映射: {file_path: {import_stmt: line_number}}
+        
         for java_class in self.java_classes.values():
             file_path = java_class.file_path
             
@@ -259,17 +418,41 @@ class JDTDeepCallChainAnalyzer:
                     content = f.read()
                 
                 imports = []
-                for line in content.split('\n'):
+                static_imports = {}  # 当前文件的静态导入
+                import_lines = {}  # 当前文件的import行号
+                
+                for line_num, line in enumerate(content.split('\n'), 1):
                     line = line.strip()
-                    if line.startswith('import ') and not line.startswith('import static'):
+                    if line.startswith('import static '):
+                        # 解析静态导入: import static com.xxx.ClassName.methodName;
+                        static_import = line.replace('import static ', '').replace(';', '').strip()
+                        # 分离类路径和方法名
+                        last_dot = static_import.rfind('.')
+                        if last_dot > 0:
+                            class_path = static_import[:last_dot]
+                            method_or_field = static_import[last_dot + 1:]
+                            if method_or_field == '*':
+                                # import static com.xxx.ClassName.* - 导入所有静态成员
+                                static_imports[f"*:{class_path}"] = class_path
+                            else:
+                                static_imports[method_or_field] = class_path
+                        # 保存静态导入的行号
+                        import_lines[f"import static {static_import};"] = line_num
+                    elif line.startswith('import ') and not line.startswith('import static'):
                         import_stmt = line.replace('import ', '').replace(';', '').strip()
                         imports.append(import_stmt)
+                        # 保存import语句的行号
+                        import_lines[f"import {import_stmt};"] = line_num
                 
                 self.package_imports[file_path] = imports
+                self.static_imports[file_path] = static_imports
+                self.import_line_numbers[file_path] = import_lines
                 
             except Exception as e:
                 logger.warning(f"读取文件导入失败 {file_path}: {e}")
                 self.package_imports[file_path] = []
+                self.static_imports[file_path] = {}
+                self.import_line_numbers[file_path] = {}
         
         logger.info(f"✅ 包导入映射构建完成: {len(self.package_imports)} 个文件")
     
@@ -328,55 +511,67 @@ class JDTDeepCallChainAnalyzer:
         indent = "  " * parent_node.depth
         logger.info(f"{indent}🔍 分析方法调用: {method.name} (深度: {parent_node.depth})")
         
+        # 收集所有子节点和映射，稍后进行链式调用去重
+        pending_children = []
+        pending_mappings = []
+        
         # 分析方法中的所有调用
         for call in method.method_calls:
+            # 检查方法是否应该被忽略
+            call_method_name = call.get("method", "")
+            call_object_name = call.get("object", "")
+            call_resolved_type = call.get("resolved_type", "")
+            call_type = call.get("type", "")  # 获取调用类型
+            
+            # 确定调用的类名：优先使用resolved_type，其次解析变量类型
+            call_class_name = ""
+            if call_resolved_type:
+                call_class_name = call_resolved_type
+            elif call_object_name:
+                # 尝试解析变量类型
+                resolved_type = self._resolve_variable_type(call_object_name, method.file_path)
+                if resolved_type:
+                    call_class_name = resolved_type
+                else:
+                    # 如果是大写开头，可能是类名
+                    if call_object_name and call_object_name[0].isupper():
+                        call_class_name = call_object_name
+            
+            if self._should_ignore_method(call_method_name, call_class_name, method.file_path, call_type):
+                logger.debug(f"{indent}  ⏭️ 跳过忽略的方法: {call_method_name}")
+                continue
+            
             child_nodes = self._resolve_method_call(call, method.file_path, parent_node.depth + 1)
             
             for child_node in child_nodes:
-                parent_node.children.append(child_node)
-                
+                # 再次检查解析后的节点是否应该被忽略（针对构造函数）
+                if self._should_ignore_method(child_node.method_name, child_node.class_name, method.file_path, child_node.call_type):
+                    continue
+                    
                 # 生成方法映射
                 mapping = self._generate_method_mapping(call, child_node, method.file_path)
-                if mapping:
-                    parent_node.method_mappings.append(mapping)
-                    self.method_mappings.append(mapping)
-                
-                # 递归分析子方法
-                child_method = self._find_method_by_signature(
-                    child_node.class_name, 
-                    child_node.method_name
-                )
-                if child_method:
-                    self._analyze_call_tree_recursive(child_node, child_method, max_depth)
+                pending_children.append((child_node, mapping))
+        
+        # 对链式调用进行去重，只保留最长的调用链
+        filtered_children = self._filter_chain_calls(pending_children)
+        
+        # 添加过滤后的子节点
+        for child_node, mapping in filtered_children:
+            parent_node.children.append(child_node)
+            
+            if mapping:
+                parent_node.method_mappings.append(mapping)
+                self.method_mappings.append(mapping)
+            
+            # 递归分析子方法（使用父节点的文件路径来确定import上下文）
+            child_method = self._find_method_by_signature(
+                child_node.class_name, 
+                child_node.method_name,
+                method.file_path  # 传递当前文件路径以便正确解析import
+            )
+            if child_method:
+                self._analyze_call_tree_recursive(child_node, child_method, max_depth)
     
-    def _resolve_method_call(self, call: Dict, current_file: str, depth: int) -> List[CallTreeNode]:
-        """解析方法调用，处理多态和继承"""
-        method_name = call["method"]
-        object_name = call.get("object", "")
-        call_type = call.get("type", "instance")
-        line_number = call.get("line", 0)
-        
-        nodes = []
-        
-        # 处理直接调用
-        if call_type == "direct" or not object_name:
-            current_class = self._find_class_by_file(current_file)
-            if current_class:
-                node = CallTreeNode(
-                    method_name=method_name,
-                    class_name=current_class.name,
-                    package_name=current_class.package,
-                    file_path=current_file,
-                    line_number=line_number,
-                    call_type="direct",
-                    parameters=call.get("arguments", []),
-                    return_type="",
-                    children=[],
-                    method_mappings=[],
-                    depth=depth
-                )
-                nodes.append(node)
-        
     def _resolve_method_call(self, call: Dict, current_file: str, depth: int) -> List[CallTreeNode]:
         """解析方法调用，处理多态和继承"""
         method_name = call["method"]
@@ -409,8 +604,12 @@ class JDTDeepCallChainAnalyzer:
         
         # 处理静态方法调用或实例方法调用
         if object_name:
+            # 处理链式调用，如 StatusCode.CODE_1000.getKey()
+            # 提取基础类名（第一个点之前的部分）
+            base_class_name = object_name.split('.')[0] if '.' in object_name else object_name
+            
             # 检查是否是已知的工具类静态方法
-            if self._is_utility_class(object_name):
+            if self._is_utility_class(object_name) or self._is_utility_class(base_class_name):
                 node = CallTreeNode(
                     method_name=method_name,
                     class_name=object_name,
@@ -427,22 +626,58 @@ class JDTDeepCallChainAnalyzer:
                 nodes.append(node)
                 return nodes
             
+            # 检查是否是枚举类或常量类的链式调用（如 StatusCode.CODE_1000.getKey()）
+            if '.' in object_name:
+                # 这是链式调用，保留完整的调用链
+                node = CallTreeNode(
+                    method_name=method_name,
+                    class_name=object_name,  # 保留完整的链式调用对象
+                    package_name="",
+                    file_path="",
+                    line_number=line_number,
+                    call_type="chain_call",  # 新增链式调用类型
+                    parameters=[f"arg{i}" for i in range(arguments)],
+                    return_type="",
+                    children=[],
+                    method_mappings=[],
+                    depth=depth
+                )
+                nodes.append(node)
+                return nodes
+            
             # 处理实例方法调用
             # 解析变量类型
             variable_type = self._resolve_variable_type(object_name, current_file)
             
             if variable_type:
-                # 查找所有可能的实现
-                implementations = self._find_all_implementations(variable_type, method_name)
+                # 查找所有可能的实现（传递current_file以便正确解析import）
+                implementations = self._find_all_implementations(variable_type, method_name, current_file)
                 
-                for impl in implementations:
+                if implementations:
+                    for impl in implementations:
+                        node = CallTreeNode(
+                            method_name=method_name,
+                            class_name=impl["class"],
+                            package_name=impl["package"],
+                            file_path=impl["file"],
+                            line_number=line_number,
+                            call_type=impl["call_type"],
+                            parameters=[f"arg{i}" for i in range(arguments)],
+                            return_type="",
+                            children=[],
+                            method_mappings=[],
+                            depth=depth
+                        )
+                        nodes.append(node)
+                else:
+                    # 找到了变量类型但没有找到实现（外部类），创建一个unresolved节点
                     node = CallTreeNode(
                         method_name=method_name,
-                        class_name=impl["class"],
-                        package_name=impl["package"],
-                        file_path=impl["file"],
+                        class_name=variable_type,  # 使用解析出的类型名
+                        package_name="",
+                        file_path="",
                         line_number=line_number,
-                        call_type=impl["call_type"],
+                        call_type="unresolved",
                         parameters=[f"arg{i}" for i in range(arguments)],
                         return_type="",
                         children=[],
@@ -467,16 +702,18 @@ class JDTDeepCallChainAnalyzer:
                 )
                 nodes.append(node)
         else:
-            # 直接方法调用（同类中的方法）
-            current_class = self._find_class_by_file(current_file)
-            if current_class:
+            # 直接方法调用（可能是同类中的方法或静态导入的方法）
+            
+            # 1. 首先检查是否是静态导入的方法
+            static_class = self._resolve_static_import(method_name, current_file)
+            if static_class:
                 node = CallTreeNode(
                     method_name=method_name,
-                    class_name=current_class.name,
-                    package_name=current_class.package,
-                    file_path=current_file,
+                    class_name=static_class,
+                    package_name="",
+                    file_path="",
                     line_number=line_number,
-                    call_type="direct",
+                    call_type="static_import",
                     parameters=[f"arg{i}" for i in range(arguments)],
                     return_type="",
                     children=[],
@@ -484,8 +721,43 @@ class JDTDeepCallChainAnalyzer:
                     depth=depth
                 )
                 nodes.append(node)
+            else:
+                # 2. 同类中的方法
+                current_class = self._find_class_by_file(current_file)
+                if current_class:
+                    node = CallTreeNode(
+                        method_name=method_name,
+                        class_name=current_class.name,
+                        package_name=current_class.package,
+                        file_path=current_file,
+                        line_number=line_number,
+                        call_type="direct",
+                        parameters=[f"arg{i}" for i in range(arguments)],
+                        return_type="",
+                        children=[],
+                        method_mappings=[],
+                        depth=depth
+                    )
+                    nodes.append(node)
         
         return nodes
+    
+    def _resolve_static_import(self, method_name: str, current_file: str) -> Optional[str]:
+        """解析静态导入的方法，返回完整的类路径"""
+        static_imports = self.static_imports.get(current_file, {})
+        
+        # 直接匹配方法名
+        if method_name in static_imports:
+            return static_imports[method_name]
+        
+        # 检查通配符导入 (import static xxx.*)
+        for key, class_path in static_imports.items():
+            if key.startswith("*:"):
+                # 这是通配符导入，需要检查类中是否有这个方法
+                # 简化处理：返回类路径
+                return class_path
+        
+        return None
     
     def _is_utility_class(self, class_name: str) -> bool:
         """检查是否是工具类"""
@@ -521,25 +793,35 @@ class JDTDeepCallChainAnalyzer:
         
         return None
     
-    def _find_all_implementations(self, type_name: str, method_name: str) -> List[Dict]:
+    def _find_all_implementations(self, type_name: str, method_name: str, current_file: str = None) -> List[Dict]:
         """查找类型的所有实现，处理接口、继承和多态"""
         implementations = []
         
-        # 1. 直接类实现
-        for java_class in self.java_classes.values():
-            if java_class.name == type_name:
-                if self._class_has_method(java_class, method_name):
-                    implementations.append({
-                        "class": java_class.name,
-                        "package": java_class.package,
-                        "file": java_class.file_path,
-                        "call_type": "concrete"
-                    })
+        # 1. 直接类实现（使用import语句确定正确的类）
+        java_class = self._find_class_by_name(type_name, current_file)
+        if java_class and self._class_has_method(java_class, method_name):
+            implementations.append({
+                "class": java_class.name,
+                "package": java_class.package,
+                "file": java_class.file_path,
+                "call_type": "concrete"
+            })
+        
+        # 如果找到了明确的import但类不在项目中，不应该继续查找
+        if current_file and current_file in self.package_imports:
+            imports = self.package_imports[current_file]
+            for import_stmt in imports:
+                if import_stmt.endswith(f".{type_name}"):
+                    # 找到了明确的import语句
+                    if not java_class:
+                        # 类不在项目中（外部类），返回空列表
+                        return implementations
+                    break
         
         # 2. 接口实现
         if type_name in self.interface_implementations:
             for impl in self.interface_implementations[type_name]:
-                impl_class = self._find_class_by_name(impl["class"])
+                impl_class = self._find_class_by_name(impl["class"], current_file)
                 if impl_class and self._class_has_method(impl_class, method_name):
                     implementations.append({
                         "class": impl["class"],
@@ -562,7 +844,7 @@ class JDTDeepCallChainAnalyzer:
         # 4. Service接口到实现类的映射
         if type_name.endswith("Service"):
             impl_name = type_name + "Impl"
-            impl_class = self._find_class_by_name(impl_name)
+            impl_class = self._find_class_by_name(impl_name, current_file)
             if impl_class and self._class_has_method(impl_class, method_name):
                 implementations.append({
                     "class": impl_class.name,
@@ -580,26 +862,102 @@ class JDTDeepCallChainAnalyzer:
                 return True
         return False
     
-    def _find_class_by_name(self, class_name: str) -> Optional[JavaClass]:
-        """根据类名查找Java类"""
-        for java_class in self.java_classes.values():
-            if java_class.name == class_name:
-                return java_class
+    def _find_class_by_name(self, class_name: str, current_file: str = None) -> Optional[JavaClass]:
+        """根据类名查找Java类，优先使用import语句确定正确的类"""
+        # 如果提供了当前文件，先根据import语句查找
+        found_import = False  # 标记是否找到了import语句
+        if current_file and current_file in self.package_imports:
+            imports = self.package_imports[current_file]
+            for import_stmt in imports:
+                # 检查import语句是否以类名结尾
+                if import_stmt.endswith(f".{class_name}"):
+                    found_import = True
+                    # 找到了完整的包路径，查找对应的类
+                    full_class_name = import_stmt
+                    for java_class in self.java_classes.values():
+                        full_name = f"{java_class.package}.{java_class.name}" if java_class.package else java_class.name
+                        if full_name == full_class_name:
+                            return java_class
+                    # 如果找到了import但类不在项目中，说明是外部类，返回None
+                    return None
+                # 检查通配符导入
+                elif import_stmt.endswith(".*"):
+                    package_prefix = import_stmt[:-2]  # 去掉 .*
+                    for java_class in self.java_classes.values():
+                        if java_class.name == class_name and java_class.package == package_prefix:
+                            return java_class
+        
+        # 如果没有找到明确的import语句，回退到简单的类名匹配
+        # 但如果找到了import语句但类不在项目中，不应该回退
+        if not found_import:
+            for java_class in self.java_classes.values():
+                if java_class.name == class_name:
+                    return java_class
         return None
     
-    def _find_method_by_signature(self, class_name: str, method_name: str) -> Optional[JavaMethod]:
+    def _find_method_by_signature(self, class_name: str, method_name: str, current_file: str = None) -> Optional[JavaMethod]:
         """根据类名和方法名查找方法"""
-        java_class = self._find_class_by_name(class_name)
+        # 1. 直接查找类名（使用import语句确定正确的类）
+        java_class = self._find_class_by_name(class_name, current_file)
         if java_class:
             for method in java_class.methods:
                 if method.name == method_name:
                     return method
+        
+        # 如果提供了current_file，检查是否有明确的import语句
+        # 如果有明确的import但类不在项目中，不应该继续查找
+        if current_file and current_file in self.package_imports:
+            imports = self.package_imports[current_file]
+            for import_stmt in imports:
+                if import_stmt.endswith(f".{class_name}"):
+                    # 找到了明确的import语句，但类不在项目中（外部类）
+                    # 不应该继续查找
+                    return None
+        
+        # 2. 尝试将变量名转换为类名（首字母大写）
+        if class_name and class_name[0].islower():
+            capitalized_name = class_name[0].upper() + class_name[1:]
+            java_class = self._find_class_by_name(capitalized_name, current_file)
+            if java_class:
+                for method in java_class.methods:
+                    if method.name == method_name:
+                        return method
+        
+        # 3. 尝试查找 ServiceImpl 类
+        if class_name.endswith("Service") or class_name.endswith("ServiceImpl"):
+            impl_name = class_name.replace("Service", "ServiceImpl") if not class_name.endswith("Impl") else class_name
+            # 首字母大写
+            if impl_name[0].islower():
+                impl_name = impl_name[0].upper() + impl_name[1:]
+            java_class = self._find_class_by_name(impl_name, current_file)
+            if java_class:
+                for method in java_class.methods:
+                    if method.name == method_name:
+                        return method
+        
+        # 4. 模糊匹配：只在没有提供current_file时进行
+        # 如果提供了current_file，说明我们已经检查过import语句了
+        if not current_file:
+            search_name = class_name[0].upper() + class_name[1:] if class_name and class_name[0].islower() else class_name
+            for java_class in self.java_classes.values():
+                # 匹配类名（忽略大小写）
+                if java_class.name.lower() == search_name.lower():
+                    for method in java_class.methods:
+                        if method.name == method_name:
+                            return method
+                # 匹配 xxxImpl 模式
+                if java_class.name.lower() == (search_name + "impl").lower():
+                    for method in java_class.methods:
+                        if method.name == method_name:
+                            return method
+        
         return None
     
     def _generate_method_mapping(self, call: Dict, node: CallTreeNode, current_file: str) -> Optional[MethodMapping]:
         """生成方法映射信息"""
         object_name = call.get("object", "")
         method_name = call["method"]
+        resolved_type = call.get("resolved_type", "")  # 获取JDT解析出的实际类型
         
         if not object_name:
             return None
@@ -619,7 +977,8 @@ class JDTDeepCallChainAnalyzer:
             import_statement=import_statement,
             call_type=node.call_type,
             line_number=call.get("line", 0),
-            file_path=current_file
+            file_path=current_file,
+            resolved_type=resolved_type  # 保存JDT解析出的实际类型
         )
     def generate_call_tree_report(self, call_tree: CallTreeNode, endpoint_path: str, output_dir: str = "./migration_output") -> str:
         """生成深度调用树报告"""
@@ -707,17 +1066,111 @@ class JDTDeepCallChainAnalyzer:
         self._build_polymorphism_analysis(call_tree, lines)
         
         # Import语句汇总
+        # 类.方法()映射（解析变量的实际类型）
+        lines.append("## 类.方法()映射")
+        lines.append("")
+        lines.append("以下是调用链中变量对应的实际类型映射（去重）：")
+        lines.append("")
+        
+        class_method_mappings = self._collect_class_method_mappings(call_tree)
+        
+        if class_method_mappings:
+            lines.append("| 变量.方法() | 实际类型.方法() | 来源文件 | 行号 |")
+            lines.append("|-------------|-----------------|----------|------|")
+            for mapping in class_method_mappings:
+                lines.append(f"| `{mapping['original']}` | `{mapping['resolved']}` | {mapping['file']} | {mapping['line']} |")
+        else:
+            lines.append("无需要映射的方法调用")
+        
+        lines.append("")
+        
         lines.append("## Import语句汇总")
         lines.append("")
-        unique_imports = set()
-        for mapping in self.method_mappings:
-            unique_imports.add(mapping.import_statement)
         
-        if unique_imports:
-            lines.append("```java")
-            for import_stmt in sorted(unique_imports):
-                lines.append(import_stmt)
-            lines.append("```")
+        # 收集有效的import语句（只包含实际解析到的类）
+        import_info = {}  # {import_statement: {"file": file_path, "line": line_number}}
+        
+        for mapping in self.method_mappings:
+            # 跳过无效的import
+            if not mapping.import_statement:
+                continue
+            
+            # 提取类名
+            import_stmt = mapping.import_statement
+            
+            # 跳过明显无效的import（变量名、链式调用等）
+            # 有效的import应该是: import xxx.xxx.ClassName; 或 import static xxx.xxx.ClassName.method;
+            if any(invalid in import_stmt for invalid in ['()', '.trim', '.map', '.orElse', 'this.', '<>']):
+                continue
+            
+            # 跳过小写开头的（变量名）
+            class_part = import_stmt.replace('import ', '').replace(';', '').strip()
+            if '.' in class_part:
+                last_part = class_part.split('.')[-1]
+            else:
+                last_part = class_part
+            
+            # 类名应该大写开头，或者是完整包路径
+            if last_part and last_part[0].islower() and '.' not in class_part:
+                continue
+            
+            # 记录import来源（只保留第一次出现的）
+            if import_stmt not in import_info:
+                file_path = mapping.file_path
+                file_name = Path(file_path).name if file_path else "unknown"
+                
+                # 尝试从import_line_numbers获取实际的import行号
+                actual_line = 0
+                actual_import_stmt = import_stmt  # 实际的import语句
+                
+                if file_path and file_path in self.import_line_numbers:
+                    import_lines = self.import_line_numbers[file_path]
+                    # 尝试匹配import语句
+                    if import_stmt in import_lines:
+                        actual_line = import_lines[import_stmt]
+                    else:
+                        # 尝试模糊匹配（去掉import前缀后匹配类名）
+                        class_name = class_part.split('.')[-1] if '.' in class_part else class_part
+                        for stmt, line_num in import_lines.items():
+                            # 检查import语句是否以类名结尾
+                            stmt_class = stmt.replace('import ', '').replace(';', '').strip()
+                            stmt_class_name = stmt_class.split('.')[-1] if '.' in stmt_class else stmt_class
+                            if stmt_class_name == class_name:
+                                actual_line = line_num
+                                actual_import_stmt = stmt  # 使用完整的import语句
+                                break
+                        
+                        # 如果还是找不到，尝试查找通配符导入
+                        if actual_line == 0:
+                            for stmt, line_num in import_lines.items():
+                                if stmt.endswith('.*;'):
+                                    # 这是通配符导入，检查包名是否匹配
+                                    package_prefix = stmt.replace('import ', '').replace('.*;', '')
+                                    # 如果原始import语句包含这个包前缀，使用通配符导入
+                                    if '.' in class_part and class_part.startswith(package_prefix):
+                                        actual_line = line_num
+                                        actual_import_stmt = stmt
+                                        break
+                
+                # 如果找不到import行号，跳过这个import（可能是Java标准库的类）
+                if actual_line == 0:
+                    # 对于Java标准库的类（如Arrays, Optional），跳过
+                    if class_part in ['Arrays', 'Optional', 'Collections', 'Objects', 'List', 'Map', 'Set']:
+                        continue
+                    # 对于没有包名的简单类名，也跳过
+                    if '.' not in class_part:
+                        continue
+                
+                import_info[actual_import_stmt] = {
+                    "file": file_name,
+                    "line": actual_line if actual_line > 0 else mapping.line_number
+                }
+        
+        if import_info:
+            lines.append("| Import语句 | 来源文件 | 行号 |")
+            lines.append("|------------|----------|------|")
+            for import_stmt, info in sorted(import_info.items()):
+                lines.append(f"| `{import_stmt}` | {info['file']} | {info['line']} |")
         else:
             lines.append("无需要的import语句")
         
@@ -746,6 +1199,14 @@ class JDTDeepCallChainAnalyzer:
             type_marker = " [具体类]"
         elif node.call_type == "direct":
             type_marker = " [直接调用]"
+        elif node.call_type == "chain_call":
+            type_marker = " [链式调用]"
+        elif node.call_type == "static":
+            type_marker = " [静态方法]"
+        elif node.call_type == "constructor":
+            type_marker = " [构造函数]"
+        elif node.call_type == "static_import":
+            type_marker = " [静态导入]"
         
         lines.append(f"{prefix}├── {node_display}{type_marker}")
         
@@ -798,6 +1259,90 @@ class JDTDeepCallChainAnalyzer:
                 lines.append(f"- ... 还有 {len(polymorphic_calls) - 5} 个多态调用")
             lines.append("")
     
+    def _collect_class_method_mappings(self, call_tree: CallTreeNode) -> List[Dict]:
+        """
+        收集类.方法()映射信息 - 直接从调用树节点收集，保证与调用树一致
+        
+        映射规则：
+        1. 变量调用（小写开头）：显示变量名 -> 实际类型
+        2. 类名调用（大写开头）：显示类名 -> 类名（保持一致性）
+        3. 链式调用：不需要映射
+        4. this调用：不需要映射
+        5. 相同的映射只保留一个（按 原始调用 -> 解析调用 去重）
+        """
+        mappings = []
+        seen = set()  # 用于去重：只按 original|resolved 去重，不包含行号
+        
+        def collect_from_tree(node: CallTreeNode, parent_file: str = ""):
+            # 获取当前节点的文件路径
+            current_file = node.file_path if node.file_path else parent_file
+            
+            # 处理当前节点的method_mappings（这些是从原始call数据生成的）
+            for mapping in node.method_mappings:
+                interface_call = mapping.interface_call  # 如 "sheetMergeService.merge()"
+                implementation_call = mapping.implementation_call  # 如 "SheetMergeServiceImpl.merge()"
+                resolved_type = mapping.resolved_type  # JDT解析出的实际类型
+                
+                if '.' in interface_call and '(' in interface_call:
+                    parts = interface_call.replace('()', '').split('.')
+                    if len(parts) >= 2:
+                        object_name = parts[0]
+                        method_name = parts[-1]
+                        
+                        # 跳过链式调用（包含多个点或括号）
+                        if '(' in object_name or len(parts) > 2:
+                            continue
+                        
+                        # 跳过this调用
+                        if object_name == "this":
+                            continue
+                        
+                        # 确定实际类型
+                        actual_type = ""
+                        
+                        # 1. 优先使用JDT解析出的resolved_type
+                        if resolved_type:
+                            actual_type = resolved_type
+                        else:
+                            # 2. 从implementation_call中提取实际类型
+                            impl_parts = implementation_call.replace('()', '').split('.')
+                            impl_class_name = impl_parts[0] if impl_parts else ""
+                            
+                            if impl_class_name and impl_class_name[0].isupper():
+                                actual_type = impl_class_name
+                            elif object_name and object_name[0].isupper():
+                                # 3. 如果object_name本身是大写开头（静态调用），使用它作为类型
+                                actual_type = object_name
+                        
+                        if not actual_type:
+                            continue
+                        
+                        # 构建映射
+                        original = f"{object_name}.{method_name}()"
+                        resolved = f"{actual_type}.{method_name}()"
+                        
+                        # 去重：只按 original|resolved 去重，相同映射只保留第一个
+                        key = f"{original}|{resolved}"
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        
+                        mappings.append({
+                            "original": original,
+                            "resolved": resolved,
+                            "file": Path(mapping.file_path).name if mapping.file_path else "unknown",
+                            "line": mapping.line_number
+                        })
+            
+            # 递归处理子节点
+            for child in node.children:
+                collect_from_tree(child, current_file)
+        
+        collect_from_tree(call_tree)
+        
+        logger.info(f"📊 收集到的类.方法()映射数: {len(mappings)}")
+        return mappings
+    
     def _build_performance_analysis(self, call_tree: CallTreeNode, lines: List[str]):
         """构建性能分析"""
         total_calls = self._count_total_calls(call_tree)
@@ -845,16 +1390,39 @@ class JDTDeepCallChainAnalyzer:
     
     def _save_import_statements(self, file_path: str):
         """保存import语句到文本文件"""
-        unique_imports = set()
+        import_info = {}  # {import_statement: {"file": file_path, "line": line_number}}
+        
         for mapping in self.method_mappings:
-            unique_imports.add(mapping.import_statement)
+            import_stmt = mapping.import_statement
+            if not import_stmt:
+                continue
+            
+            # 跳过无效的import
+            if any(invalid in import_stmt for invalid in ['()', '.trim', '.map', '.orElse', 'this.', '<>']):
+                continue
+            
+            class_part = import_stmt.replace('import ', '').replace(';', '').strip()
+            if '.' in class_part:
+                last_part = class_part.split('.')[-1]
+            else:
+                last_part = class_part
+            
+            if last_part and last_part[0].islower() and '.' not in class_part:
+                continue
+            
+            if import_stmt not in import_info:
+                import_info[import_stmt] = {
+                    "file": Path(mapping.file_path).name if mapping.file_path else "unknown",
+                    "line": mapping.line_number
+                }
         
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write("// 深度调用树分析生成的Import语句\n")
-            f.write("// 根据实际需要添加到对应的Java文件中\n\n")
+            f.write("// 根据实际需要添加到对应的Java文件中\n")
+            f.write("// 格式: import语句 // 来源文件:行号\n\n")
             
-            for import_stmt in sorted(unique_imports):
-                f.write(import_stmt + "\n")
+            for import_stmt, info in sorted(import_info.items()):
+                f.write(f"{import_stmt} // {info['file']}:{info['line']}\n")
     
     def _count_total_calls(self, node: CallTreeNode) -> int:
         """计算总调用数"""

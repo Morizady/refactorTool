@@ -487,6 +487,9 @@ class JDTParser:
             java_class = None
             package_name = ""
             
+            # 保存compilation_unit引用，用于获取行号
+            self._current_compilation_unit = compilation_unit
+            
             # 获取包名
             package_decl = compilation_unit.getPackage()
             if package_decl:
@@ -506,6 +509,16 @@ class JDTParser:
         except Exception as e:
             logger.error(f"提取类信息失败: {e}")
             return None
+    
+    def _get_line_number(self, node) -> int:
+        """获取AST节点的行号"""
+        try:
+            if hasattr(self, '_current_compilation_unit') and self._current_compilation_unit:
+                start_position = node.getStartPosition()
+                return self._current_compilation_unit.getLineNumber(start_position)
+        except:
+            pass
+        return 0
     
     def _is_instance_of(self, obj, class_name: str) -> bool:
         """检查对象是否是指定类的实例"""
@@ -570,6 +583,18 @@ class JDTParser:
         except Exception as e:
             logger.warning(f"提取方法失败: {e}")
         
+        # 提取字段（用于解析变量类型）
+        try:
+            fields = type_decl.getFields()
+            if fields:
+                for i in range(len(fields)):
+                    field = fields[i]
+                    field_info = self._extract_field_declaration(field)
+                    if field_info:
+                        java_class.fields.append(field_info)
+        except Exception as e:
+            logger.warning(f"提取字段失败: {e}")
+        
         return java_class
     
     def _extract_method_declaration(self, method_decl, class_name: str, file_path: str) -> Optional[JavaMethod]:
@@ -577,15 +602,18 @@ class JDTParser:
         try:
             method_name = str(method_decl.getName())
             
-            # 获取参数
+            # 获取参数及其类型
             parameters = []
+            param_types = {}  # 参数名 -> 类型
             try:
                 params = method_decl.parameters()
                 if params:
                     for i in range(params.size()):
                         param = params.get(i)
                         param_type = str(param.getType())
+                        param_name = str(param.getName())
                         parameters.append(param_type)
+                        param_types[param_name] = param_type
             except:
                 pass
             
@@ -598,6 +626,18 @@ class JDTParser:
             except:
                 pass
             
+            # 收集局部变量类型
+            local_var_types = {}
+            try:
+                body = method_decl.getBody()
+                if body:
+                    local_var_types = self._extract_local_variable_types(body)
+            except:
+                pass
+            
+            # 合并参数类型和局部变量类型
+            all_var_types = {**param_types, **local_var_types}
+            
             # 创建方法对象
             java_method = JavaMethod(
                 name=method_name,
@@ -609,8 +649,8 @@ class JDTParser:
                 is_constructor=method_decl.isConstructor() if hasattr(method_decl, 'isConstructor') else False
             )
             
-            # 提取方法调用
-            java_method.method_calls = self._extract_method_calls(method_decl)
+            # 提取方法调用，传入变量类型信息
+            java_method.method_calls = self._extract_method_calls(method_decl, all_var_types)
             
             return java_method
             
@@ -618,8 +658,122 @@ class JDTParser:
             logger.warning(f"提取方法声明失败: {e}")
             return None
     
-    def _extract_method_calls(self, method_decl) -> List[Dict]:
+    def _extract_field_declaration(self, field_decl) -> Optional[Dict]:
+        """提取字段声明信息"""
+        try:
+            # 获取字段类型
+            field_type = str(field_decl.getType())
+            
+            # 获取字段名（可能有多个）
+            fragments = field_decl.fragments()
+            if fragments and fragments.size() > 0:
+                fragment = fragments.get(0)
+                field_name = str(fragment.getName())
+                
+                return {
+                    "name": field_name,
+                    "type": field_type,
+                    "line": self._get_line_number(field_decl)
+                }
+        except Exception as e:
+            logger.warning(f"提取字段声明失败: {e}")
+        return None
+    
+    def _extract_local_variable_types(self, block) -> Dict[str, str]:
+        """从代码块中提取局部变量类型"""
+        var_types = {}
+        try:
+            statements = block.statements()
+            if statements:
+                for i in range(statements.size()):
+                    stmt = statements.get(i)
+                    stmt_type = stmt.getClass().getSimpleName()
+                    
+                    if stmt_type == "VariableDeclarationStatement":
+                        # 变量声明语句
+                        var_type = str(stmt.getType())
+                        fragments = stmt.fragments()
+                        if fragments:
+                            for j in range(fragments.size()):
+                                fragment = fragments.get(j)
+                                var_name = str(fragment.getName())
+                                var_types[var_name] = var_type
+                    elif stmt_type == "ForStatement":
+                        # for循环中的变量声明
+                        try:
+                            initializers = stmt.initializers()
+                            if initializers:
+                                for j in range(initializers.size()):
+                                    init = initializers.get(j)
+                                    if init.getClass().getSimpleName() == "VariableDeclarationExpression":
+                                        var_type = str(init.getType())
+                                        frags = init.fragments()
+                                        if frags:
+                                            for k in range(frags.size()):
+                                                frag = frags.get(k)
+                                                var_name = str(frag.getName())
+                                                var_types[var_name] = var_type
+                        except:
+                            pass
+                    elif stmt_type == "EnhancedForStatement":
+                        # 增强for循环
+                        try:
+                            param = stmt.getParameter()
+                            var_name = str(param.getName())
+                            var_type = str(param.getType())
+                            var_types[var_name] = var_type
+                        except:
+                            pass
+                    elif stmt_type == "TryStatement":
+                        # try语句中的资源声明
+                        try:
+                            resources = stmt.resources()
+                            if resources:
+                                for j in range(resources.size()):
+                                    res = resources.get(j)
+                                    if res.getClass().getSimpleName() == "VariableDeclarationExpression":
+                                        var_type = str(res.getType())
+                                        frags = res.fragments()
+                                        if frags:
+                                            for k in range(frags.size()):
+                                                frag = frags.get(k)
+                                                var_name = str(frag.getName())
+                                                var_types[var_name] = var_type
+                        except:
+                            pass
+                        # try块内的变量
+                        try:
+                            try_body = stmt.getBody()
+                            if try_body:
+                                var_types.update(self._extract_local_variable_types(try_body))
+                        except:
+                            pass
+                    elif stmt_type == "Block":
+                        # 嵌套代码块
+                        var_types.update(self._extract_local_variable_types(stmt))
+                    elif stmt_type == "IfStatement":
+                        # if语句块
+                        try:
+                            then_stmt = stmt.getThenStatement()
+                            if then_stmt and then_stmt.getClass().getSimpleName() == "Block":
+                                var_types.update(self._extract_local_variable_types(then_stmt))
+                            else_stmt = stmt.getElseStatement()
+                            if else_stmt and else_stmt.getClass().getSimpleName() == "Block":
+                                var_types.update(self._extract_local_variable_types(else_stmt))
+                        except:
+                            pass
+        except Exception as e:
+            logger.warning(f"提取局部变量类型失败: {e}")
+        return var_types
+    
+    def _extract_method_calls(self, method_decl, var_types: Dict[str, str] = None) -> List[Dict]:
         """提取方法调用"""
+        if var_types is None:
+            var_types = {}
+        
+        # 保存变量类型信息供后续使用
+        self._current_var_types = var_types
+        
         calls = []
         try:
             # 获取方法体
@@ -686,6 +840,123 @@ class JDTParser:
             elif stmt_type == "Block":
                 # 代码块
                 calls.extend(self._extract_calls_from_block(stmt))
+            elif stmt_type == "TryStatement":
+                # try语句
+                try:
+                    # try块
+                    try_body = stmt.getBody()
+                    if try_body:
+                        calls.extend(self._extract_calls_from_block(try_body))
+                    
+                    # catch块
+                    catch_clauses = stmt.catchClauses()
+                    if catch_clauses:
+                        for i in range(catch_clauses.size()):
+                            catch_clause = catch_clauses.get(i)
+                            catch_body = catch_clause.getBody()
+                            if catch_body:
+                                calls.extend(self._extract_calls_from_block(catch_body))
+                    
+                    # finally块
+                    finally_block = stmt.getFinally()
+                    if finally_block:
+                        calls.extend(self._extract_calls_from_block(finally_block))
+                except:
+                    pass
+            elif stmt_type == "WhileStatement":
+                # while语句
+                try:
+                    condition = stmt.getExpression()
+                    if condition:
+                        calls.extend(self._extract_calls_from_expression(condition))
+                    body = stmt.getBody()
+                    if body:
+                        calls.extend(self._extract_calls_from_statement(body))
+                except:
+                    pass
+            elif stmt_type == "ForStatement":
+                # for语句
+                try:
+                    # 初始化部分
+                    initializers = stmt.initializers()
+                    if initializers:
+                        for i in range(initializers.size()):
+                            init = initializers.get(i)
+                            calls.extend(self._extract_calls_from_expression(init))
+                    # 条件部分
+                    condition = stmt.getExpression()
+                    if condition:
+                        calls.extend(self._extract_calls_from_expression(condition))
+                    # 更新部分
+                    updaters = stmt.updaters()
+                    if updaters:
+                        for i in range(updaters.size()):
+                            updater = updaters.get(i)
+                            calls.extend(self._extract_calls_from_expression(updater))
+                    # 循环体
+                    body = stmt.getBody()
+                    if body:
+                        calls.extend(self._extract_calls_from_statement(body))
+                except:
+                    pass
+            elif stmt_type == "EnhancedForStatement":
+                # 增强for语句
+                try:
+                    # 迭代表达式
+                    expr = stmt.getExpression()
+                    if expr:
+                        calls.extend(self._extract_calls_from_expression(expr))
+                    # 循环体
+                    body = stmt.getBody()
+                    if body:
+                        calls.extend(self._extract_calls_from_statement(body))
+                except:
+                    pass
+            elif stmt_type == "DoStatement":
+                # do-while语句
+                try:
+                    body = stmt.getBody()
+                    if body:
+                        calls.extend(self._extract_calls_from_statement(body))
+                    condition = stmt.getExpression()
+                    if condition:
+                        calls.extend(self._extract_calls_from_expression(condition))
+                except:
+                    pass
+            elif stmt_type == "SwitchStatement":
+                # switch语句
+                try:
+                    expr = stmt.getExpression()
+                    if expr:
+                        calls.extend(self._extract_calls_from_expression(expr))
+                    statements = stmt.statements()
+                    if statements:
+                        for i in range(statements.size()):
+                            s = statements.get(i)
+                            s_type = s.getClass().getSimpleName()
+                            if s_type != "SwitchCase":
+                                calls.extend(self._extract_calls_from_statement(s))
+                except:
+                    pass
+            elif stmt_type == "SynchronizedStatement":
+                # synchronized语句
+                try:
+                    expr = stmt.getExpression()
+                    if expr:
+                        calls.extend(self._extract_calls_from_expression(expr))
+                    body = stmt.getBody()
+                    if body:
+                        calls.extend(self._extract_calls_from_block(body))
+                except:
+                    pass
+            elif stmt_type == "ThrowStatement":
+                # throw语句
+                try:
+                    expr = stmt.getExpression()
+                    if expr:
+                        calls.extend(self._extract_calls_from_expression(expr))
+                except:
+                    pass
                 
         except Exception as e:
             logger.warning(f"从语句提取调用失败: {e}")
@@ -703,11 +974,32 @@ class JDTParser:
                 call_info = self._extract_method_invocation(expr)
                 if call_info:
                     calls.append(call_info)
+                
+                # 递归提取链式调用中的方法调用（expression部分）
+                expression = expr.getExpression()
+                if expression:
+                    calls.extend(self._extract_calls_from_expression(expression))
+                
+                # 递归提取参数中的方法调用
+                arguments = expr.arguments()
+                if arguments:
+                    for i in range(arguments.size()):
+                        arg = arguments.get(i)
+                        calls.extend(self._extract_calls_from_expression(arg))
+                        
             elif expr_type == "ClassInstanceCreation":
                 # 构造函数调用
                 call_info = self._extract_constructor_call(expr)
                 if call_info:
                     calls.append(call_info)
+                
+                # 递归提取参数中的方法调用
+                arguments = expr.arguments()
+                if arguments:
+                    for i in range(arguments.size()):
+                        arg = arguments.get(i)
+                        calls.extend(self._extract_calls_from_expression(arg))
+                        
             elif expr_type == "Assignment":
                 # 赋值表达式
                 right_side = expr.getRightHandSide()
@@ -721,6 +1013,32 @@ class JDTParser:
                     calls.extend(self._extract_calls_from_expression(left))
                 if right:
                     calls.extend(self._extract_calls_from_expression(right))
+            elif expr_type == "PrefixExpression":
+                # 前缀表达式，如 !xxx
+                operand = expr.getOperand()
+                if operand:
+                    calls.extend(self._extract_calls_from_expression(operand))
+            elif expr_type == "ParenthesizedExpression":
+                # 括号表达式
+                inner = expr.getExpression()
+                if inner:
+                    calls.extend(self._extract_calls_from_expression(inner))
+            elif expr_type == "CastExpression":
+                # 类型转换表达式
+                inner = expr.getExpression()
+                if inner:
+                    calls.extend(self._extract_calls_from_expression(inner))
+            elif expr_type == "ConditionalExpression":
+                # 三元表达式 a ? b : c
+                condition = expr.getExpression()
+                then_expr = expr.getThenExpression()
+                else_expr = expr.getElseExpression()
+                if condition:
+                    calls.extend(self._extract_calls_from_expression(condition))
+                if then_expr:
+                    calls.extend(self._extract_calls_from_expression(then_expr))
+                if else_expr:
+                    calls.extend(self._extract_calls_from_expression(else_expr))
                     
         except Exception as e:
             logger.warning(f"从表达式提取调用失败: {e}")
@@ -735,8 +1053,47 @@ class JDTParser:
             # 获取调用对象
             expression = method_invocation.getExpression()
             object_name = ""
+            call_type = "static"
+            
             if expression:
-                object_name = str(expression)
+                expr_type = expression.getClass().getSimpleName()
+                
+                # 处理不同类型的表达式
+                if expr_type == "SimpleName":
+                    # 简单变量名，如 result, service
+                    object_name = str(expression)
+                    call_type = "instance"
+                elif expr_type == "QualifiedName":
+                    # 限定名，如 StatusCode.CODE_1000
+                    object_name = str(expression)
+                    call_type = "qualified"
+                elif expr_type == "MethodInvocation":
+                    # 链式方法调用，如 xxx.method1().method2()
+                    # 只取最后一个方法调用的返回值作为对象
+                    # 这里简化处理，用方法名表示
+                    inner_method = str(expression.getName())
+                    inner_expr = expression.getExpression()
+                    if inner_expr:
+                        inner_obj = self._get_simple_object_name(inner_expr)
+                        object_name = f"{inner_obj}.{inner_method}()"
+                    else:
+                        object_name = f"{inner_method}()"
+                    call_type = "chain"
+                elif expr_type == "FieldAccess":
+                    # 字段访问，如 this.field
+                    object_name = str(expression)
+                    call_type = "field"
+                elif expr_type == "ThisExpression":
+                    object_name = "this"
+                    call_type = "instance"
+                elif expr_type == "ClassInstanceCreation":
+                    # new Xxx().method()
+                    object_name = f"new {expression.getType()}"
+                    call_type = "constructor_chain"
+                else:
+                    # 其他复杂表达式，简化处理
+                    object_name = self._get_simple_object_name(expression)
+                    call_type = "instance"
             
             # 获取参数数量
             arguments = method_invocation.arguments()
@@ -749,18 +1106,57 @@ class JDTParser:
                     arg = arguments.get(i)
                     arg_types.append(str(arg))
             
+            # 获取行号
+            line_number = self._get_line_number(method_invocation)
+            
+            # 解析变量的实际类型
+            resolved_type = ""
+            if object_name and call_type == "instance":
+                # 从当前变量类型映射中查找
+                if hasattr(self, '_current_var_types') and object_name in self._current_var_types:
+                    resolved_type = self._current_var_types[object_name]
+            
             return {
                 "method": method_name,
                 "object": object_name,
                 "arguments": arg_count,
                 "argument_types": arg_types,
-                "type": "instance" if object_name else "static",
-                "line": 0  # JDT可以提供准确的行号
+                "type": call_type,
+                "line": line_number,
+                "resolved_type": resolved_type  # 解析出的实际类型
             }
             
         except Exception as e:
             logger.warning(f"提取方法调用信息失败: {e}")
             return None
+    
+    def _get_simple_object_name(self, expression) -> str:
+        """获取简化的对象名称"""
+        try:
+            expr_type = expression.getClass().getSimpleName()
+            
+            if expr_type == "SimpleName":
+                return str(expression)
+            elif expr_type == "QualifiedName":
+                # 只取最后一部分，如 StatusCode.CODE_1000 -> StatusCode.CODE_1000
+                return str(expression)
+            elif expr_type == "MethodInvocation":
+                # 链式调用，返回简化形式
+                inner_expr = expression.getExpression()
+                method_name = str(expression.getName())
+                if inner_expr:
+                    inner_obj = self._get_simple_object_name(inner_expr)
+                    return f"{inner_obj}.{method_name}()"
+                return f"{method_name}()"
+            elif expr_type == "ThisExpression":
+                return "this"
+            elif expr_type == "FieldAccess":
+                return str(expression.getName())
+            else:
+                # 复杂表达式，返回类型名
+                return f"<{expr_type}>"
+        except:
+            return "<unknown>"
     
     def _extract_constructor_call(self, constructor_call) -> Optional[Dict]:
         """提取构造函数调用信息"""
@@ -778,13 +1174,16 @@ class JDTParser:
                     arg = arguments.get(i)
                     arg_types.append(str(arg))
             
+            # 获取行号
+            line_number = self._get_line_number(constructor_call)
+            
             return {
                 "method": "<init>",
                 "object": type_name,
                 "arguments": arg_count,
                 "argument_types": arg_types,
                 "type": "constructor",
-                "line": 0
+                "line": line_number
             }
             
         except Exception as e:

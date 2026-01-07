@@ -16,3 +16,4 @@ temp_test.java
 *.dll
 *.dylib
 *test_output*
+*apache-maven-repository*
