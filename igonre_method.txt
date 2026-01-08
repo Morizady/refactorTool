@@ -34,3 +34,5 @@ isNullStr
 toString
 split
 size
+Anti.execute
+SqlUtil.checkInject

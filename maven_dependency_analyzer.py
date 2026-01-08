@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Tuple
 import logging
 from dataclasses import dataclass
 from jar_analyzer import JarAnalyzer
+from config_loader import get_config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -51,21 +52,45 @@ class MavenDependencyAnalyzer:
     
     def __init__(self, maven_repo_path: str = None):
         """初始化Maven依赖分析器"""
-        self.maven_repo_path = Path(maven_repo_path) if maven_repo_path else self._find_maven_repo()
+        # 优先使用传入的路径，否则从配置文件读取
+        if maven_repo_path:
+            self.maven_repo_path = Path(maven_repo_path)
+        else:
+            config = get_config()
+            repo_path = config.get_maven_repository_path()
+            self.maven_repo_path = Path(repo_path)
+        
         self.jar_analyzer = JarAnalyzer()
         self.dependencies = []
         self.resolved_jars = {}
         self.missing_jars = []
         
         logger.info(f"Maven仓库路径: {self.maven_repo_path}")
+        
+        # 检查Maven仓库是否存在
+        if not self.maven_repo_path.exists():
+            logger.warning(f"Maven仓库路径不存在: {self.maven_repo_path}")
+            logger.info("请检查config.yml中的maven.repository_path配置")
+        else:
+            logger.info(f"Maven仓库验证成功: {self.maven_repo_path}")
     
     def _find_maven_repo(self) -> Path:
-        """查找Maven仓库路径"""
+        """查找Maven仓库路径（保留作为备用方法）"""
+        # 首先尝试从配置文件获取
+        try:
+            config = get_config()
+            config_path = config.get_maven_repository_path()
+            if config_path and Path(config_path).exists():
+                logger.info(f"从配置文件找到Maven仓库: {config_path}")
+                return Path(config_path)
+        except Exception as e:
+            logger.warning(f"从配置文件读取Maven仓库路径失败: {e}")
+        
         # 常见的Maven仓库位置
         possible_paths = [
             Path("apache-maven-repository"),  # 用户指定的路径
             Path.home() / ".m2" / "repository",  # 默认位置
-            Path("D:/apache-maven-repository"),  # Windows常见位置
+            Path("D:/Program Files/Apache/apache-maven-repository"),  # Windows常见位置
             Path("C:/Users") / os.getenv("USERNAME", "") / ".m2" / "repository"
         ]
         
@@ -74,9 +99,19 @@ class MavenDependencyAnalyzer:
                 logger.info(f"找到Maven仓库: {path}")
                 return path
         
-        # 如果都找不到，使用用户指定的路径
+        # 如果都找不到，使用配置文件中的路径（即使不存在）
+        try:
+            config = get_config()
+            config_path = config.get_maven_repository_path()
+            if config_path:
+                logger.warning(f"使用配置文件中的Maven仓库路径（可能不存在）: {config_path}")
+                return Path(config_path)
+        except:
+            pass
+        
+        # 最后的备选方案
         default_path = Path("apache-maven-repository")
-        logger.warning(f"未找到标准Maven仓库，使用: {default_path}")
+        logger.warning(f"未找到标准Maven仓库，使用默认路径: {default_path}")
         return default_path
     
     def parse_pom(self, pom_path: str) -> List[MavenDependency]:
@@ -367,15 +402,21 @@ def test_maven_dependency_analyzer():
     print("🧪 测试Maven依赖分析器")
     print("=" * 50)
     
-    # 初始化分析器
-    maven_repo = "apache-maven-repository"  # 用户指定的Maven仓库路径
-    analyzer = MavenDependencyAnalyzer(maven_repo)
+    # 初始化分析器（使用配置文件中的Maven仓库路径）
+    analyzer = MavenDependencyAnalyzer()
+    
+    # 显示配置信息
+    config = get_config()
+    print(f"📁 配置的Maven仓库路径: {config.get_maven_repository_path()}")
+    print(f"📁 实际使用的Maven仓库路径: {analyzer.maven_repo_path}")
+    print(f"📁 Maven仓库是否存在: {'是' if analyzer.maven_repo_path.exists() else '否'}")
     
     # 解析POM文件
     pom_path = "test_projects/sc_pcc_business/pom.xml"
     
     if not os.path.exists(pom_path):
         print(f"❌ POM文件不存在: {pom_path}")
+        print("请确保测试项目存在，或修改pom_path变量指向正确的POM文件")
         return
     
     # 解析依赖

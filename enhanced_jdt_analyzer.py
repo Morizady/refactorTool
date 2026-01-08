@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 from jdt_parser import JDTParser
 from maven_dependency_analyzer import MavenDependencyAnalyzer
 from jdt_call_chain_analyzer import JDTDeepCallChainAnalyzer
+from config_loader import get_config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -21,7 +22,14 @@ class EnhancedJDTAnalyzer:
     def __init__(self, project_path: str, maven_repo_path: str = None):
         """初始化增强版JDT分析器"""
         self.project_path = Path(project_path)
-        self.maven_analyzer = MavenDependencyAnalyzer(maven_repo_path)
+        
+        # 优先使用传入的路径，否则使用配置文件中的路径
+        if maven_repo_path:
+            self.maven_analyzer = MavenDependencyAnalyzer(maven_repo_path)
+        else:
+            # 使用配置文件中的Maven仓库路径
+            self.maven_analyzer = MavenDependencyAnalyzer()
+        
         self.jdt_parser = None
         self.call_chain_analyzer = None
         
@@ -31,6 +39,7 @@ class EnhancedJDTAnalyzer:
         self.dependency_classes = {}
         
         logger.info(f"🚀 初始化增强版JDT分析器: {project_path}")
+        logger.info(f"📁 Maven仓库路径: {self.maven_analyzer.maven_repo_path}")
     
     def initialize_with_maven_dependencies(self) -> bool:
         """使用Maven依赖初始化JDT环境"""

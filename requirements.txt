@@ -3,7 +3,7 @@ pyyaml>=5.4.0
 pathlib2>=2.3.0; python_version<"3.4"
 
 # JDT解析器依赖
-JPype1>=1.4.0
+JPype1==1.5.2
 
 # 原有依赖 (用于AST解析)
 javalang>=0.13.0
@@ -11,3 +11,6 @@ javalang>=0.13.0
 # 可选依赖
 requests>=2.25.0
 urllib3>=1.26.0
+
+# 配置文件解析
+PyYAML>=6.0

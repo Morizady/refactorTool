@@ -189,6 +189,12 @@ class JDTDeepCallChainAnalyzer:
                         if method_name and not method_name.startswith('#'):
                             self.ignore_methods.add(method_name)
                 logger.info(f"✅ 加载忽略方法列表: {len(self.ignore_methods)} 个方法")
+                
+                # 显示一些加载的忽略规则（调试用）
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("📋 忽略方法列表:")
+                    for method in sorted(self.ignore_methods):
+                        logger.debug(f"  - {method}")
             else:
                 logger.info(f"⚠️ 忽略方法文件不存在: {ignore_methods_file}")
         except Exception as e:
@@ -204,15 +210,39 @@ class JDTDeepCallChainAnalyzer:
             current_file: 当前文件路径（用于查找类定义）
             call_type: 调用类型（用于判断是否是构造函数）
         """
-        # 检查是否在忽略列表中
+        # 检查是否在忽略列表中（支持方法名和类名.方法名两种格式）
         if method_name in self.ignore_methods:
+            logger.debug(f"🚫 忽略方法（方法名匹配）: {method_name}")
             return True
+        
+        # 检查类名.方法名格式
+        if class_name:
+            full_method_name = f"{class_name}.{method_name}"
+            if full_method_name in self.ignore_methods:
+                logger.debug(f"🚫 忽略方法（完整匹配）: {full_method_name}")
+                return True
+            
+            # 也检查简单类名.方法名格式（去掉包名）
+            simple_class_name = class_name.split('.')[-1] if '.' in class_name else class_name
+            simple_full_method_name = f"{simple_class_name}.{method_name}"
+            if simple_full_method_name in self.ignore_methods:
+                logger.debug(f"🚫 忽略方法（简单类名匹配）: {simple_full_method_name}")
+                return True
+        
         # 如果配置不显示构造函数，检查是否是构造函数调用
         if not self.show_constructors and (call_type == "constructor" or method_name == "<init>"):
+            logger.debug(f"🚫 忽略构造函数: {method_name}")
             return True
         # 如果配置不显示getter/setter，检查是否是简单的getter/setter方法
         if not self.show_getters_setters and self._is_simple_getter_or_setter(method_name, class_name, current_file):
+            logger.debug(f"🚫 忽略getter/setter: {method_name}")
             return True
+        
+        # 调试信息：显示未被忽略的方法
+        if method_name == "execute" and class_name:
+            logger.debug(f"🔍 检查方法: {class_name}.{method_name} - 未被忽略")
+            logger.debug(f"  - 忽略列表包含: {sorted([m for m in self.ignore_methods if 'execute' in m])}")
+        
         return False
     
     def _initialize_project(self):
@@ -580,6 +610,14 @@ class JDTDeepCallChainAnalyzer:
         line_number = call.get("line", 0)
         arguments = call.get("arguments", 0)
         
+        # 在创建节点之前进行忽略检查
+        resolved_type = call.get("resolved_type", "")
+        class_name = resolved_type or object_name
+        
+        if self._should_ignore_method(method_name, class_name, current_file, call_type):
+            logger.debug(f"🚫 在节点创建阶段忽略方法: {class_name}.{method_name}")
+            return []  # 返回空列表，不创建任何节点
+        
         nodes = []
         
         # 处理构造函数调用
@@ -626,8 +664,70 @@ class JDTDeepCallChainAnalyzer:
                 nodes.append(node)
                 return nodes
             
+            # 检查是否是this.field的调用
+            if object_name.startswith("this."):
+                field_name = object_name[5:]  # 去掉"this."
+                # 解析this.field的实际类型
+                variable_type = self._resolve_variable_type(field_name, current_file)
+                
+                if variable_type:
+                    # 查找所有可能的实现
+                    implementations = self._find_all_implementations(variable_type, method_name, current_file)
+                    
+                    if implementations:
+                        for impl in implementations:
+                            node = CallTreeNode(
+                                method_name=method_name,
+                                class_name=impl["class"],
+                                package_name=impl["package"],
+                                file_path=impl["file"],
+                                line_number=line_number,
+                                call_type=impl["call_type"],
+                                parameters=[f"arg{i}" for i in range(arguments)],
+                                return_type="",
+                                children=[],
+                                method_mappings=[],
+                                depth=depth
+                            )
+                            nodes.append(node)
+                        return nodes
+                    else:
+                        # 找到了变量类型但没有找到实现（外部类）
+                        node = CallTreeNode(
+                            method_name=method_name,
+                            class_name=variable_type,
+                            package_name="",
+                            file_path="",
+                            line_number=line_number,
+                            call_type="unresolved",
+                            parameters=[f"arg{i}" for i in range(arguments)],
+                            return_type="",
+                            children=[],
+                            method_mappings=[],
+                            depth=depth
+                        )
+                        nodes.append(node)
+                        return nodes
+                else:
+                    # 无法解析this.field的类型，保留原始调用
+                    node = CallTreeNode(
+                        method_name=method_name,
+                        class_name=object_name,
+                        package_name="",
+                        file_path="",
+                        line_number=line_number,
+                        call_type="chain_call",
+                        parameters=[f"arg{i}" for i in range(arguments)],
+                        return_type="",
+                        children=[],
+                        method_mappings=[],
+                        depth=depth
+                    )
+                    nodes.append(node)
+                    return nodes
+            
             # 检查是否是枚举类或常量类的链式调用（如 StatusCode.CODE_1000.getKey()）
-            if '.' in object_name:
+            elif '.' in object_name:
                 # 这是链式调用，保留完整的调用链
                 node = CallTreeNode(
                     method_name=method_name,
@@ -774,6 +874,12 @@ class JDTDeepCallChainAnalyzer:
         if not current_class:
             return None
         
+        # 通用泛型字段推理 - 替代之前的baseService特殊处理
+        generic_field_type = self._resolve_generic_field_type(variable_name, current_class, current_file)
+        if generic_field_type:
+            logger.debug(f"🎯 通过泛型推理得到字段类型: {variable_name} -> {generic_field_type}")
+            return generic_field_type
+        
         # 1. 检查字段声明
         for field in current_class.fields:
             if field.get("name") == variable_name:
@@ -792,6 +898,391 @@ class JDTDeepCallChainAnalyzer:
                 return class_name
         
         return None
+    
+    def _resolve_generic_field_type(self, field_name: str, current_class, current_file: str) -> Optional[str]:
+        """
+        通用的泛型字段类型推理
+        支持所有泛型字段：baseService, baseMapper, 以及其他泛型字段
+        """
+        try:
+            # 1. 获取字段的声明类型
+            field_declared_type = self._get_field_declared_type(field_name, current_class)
+            if not field_declared_type:
+                return None
+            
+            logger.debug(f"🔍 字段 {field_name} 的声明类型: {field_declared_type}")
+            
+            # 2. 检查是否是泛型参数（如 M, W, T, E 等单字母泛型参数）
+            if self._is_generic_parameter(field_declared_type):
+                logger.debug(f"🧬 识别为泛型参数: {field_declared_type}")
+                # 3. 从继承关系中推理具体类型
+                concrete_type = self._resolve_generic_parameter_type(field_declared_type, current_class, current_file)
+                if concrete_type:
+                    logger.debug(f"✅ 泛型推理成功: {field_declared_type} -> {concrete_type}")
+                    return concrete_type
+            
+            # 4. 如果不是泛型参数，但可能是泛型基类，尝试推理
+            elif self._is_generic_base_type(field_declared_type):
+                logger.debug(f"🏗️ 识别为泛型基类: {field_declared_type}")
+                # 例如：BaseMapper<T> -> MaterialConfigMapper
+                concrete_type = self._resolve_generic_base_type(field_declared_type, current_class, current_file)
+                if concrete_type:
+                    logger.debug(f"✅ 泛型基类推理成功: {field_declared_type} -> {concrete_type}")
+                    return concrete_type
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"泛型字段推理失败 {field_name}: {e}")
+            return None
+    
+    def _get_field_declared_type(self, field_name: str, current_class) -> Optional[str]:
+        """获取字段的声明类型，包括从继承链中查找"""
+        try:
+            # 在当前类中查找字段
+            for field in current_class.fields:
+                if field.get("name") == field_name:
+                    return field.get("type")
+            
+            # 特殊处理已知的框架字段
+            framework_fields = self._get_framework_field_type(field_name, current_class)
+            if framework_fields:
+                return framework_fields
+            
+            # 在父类中查找字段（处理继承的字段）
+            parent_classes = self._get_parent_classes_info(current_class)
+            for parent_class in parent_classes:
+                for field in parent_class.get('fields', []):
+                    if field.get("name") == field_name:
+                        return field.get("type")
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"获取字段声明类型失败 {field_name}: {e}")
+            return None
+    
+    def _get_framework_field_type(self, field_name: str, current_class) -> Optional[str]:
+        """获取框架字段的类型（如MyBatis Plus、Spring等框架的字段）"""
+        try:
+            extends_info = getattr(current_class, 'extends', '') or ''
+            
+            # MyBatis Plus ServiceImpl的baseMapper字段
+            if field_name == "baseMapper" and "ServiceImpl" in extends_info:
+                logger.debug(f"🔍 识别为MyBatis Plus的baseMapper字段")
+                return "M"  # MyBatis Plus ServiceImpl<M, T>中的M
+            
+            # Spring框架的baseService字段
+            if field_name == "baseService" and "BaseDatagridController" in extends_info:
+                logger.debug(f"🔍 识别为Spring框架的baseService字段")
+                return "W"  # BaseDatagridController<W, T>中的W
+            
+            # 其他框架字段可以在这里扩展
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"获取框架字段类型失败 {field_name}: {e}")
+            return None
+    
+    def _is_generic_parameter(self, type_name: str) -> bool:
+        """检查是否是泛型参数（如 M, W, T, E 等）"""
+        if not type_name:
+            return False
+        
+        # 泛型参数通常是单个大写字母，或者是简短的大写字母组合
+        return (
+            len(type_name) == 1 and type_name.isupper() or  # M, W, T
+            len(type_name) <= 3 and type_name.isupper() and type_name.isalpha()  # DTO, VO等
+        )
+    
+    def _is_generic_base_type(self, type_name: str) -> bool:
+        """检查是否是泛型基类（如 BaseMapper, BaseService 等）"""
+        if not type_name:
+            return False
+        
+        # 常见的泛型基类模式
+        generic_base_patterns = [
+            'BaseMapper', 'BaseService', 'BaseDao', 'BaseRepository',
+            'BaseController', 'BaseEntity', 'BaseModel'
+        ]
+        
+        return any(pattern in type_name for pattern in generic_base_patterns)
+    
+    def _resolve_generic_parameter_type(self, generic_param: str, current_class, current_file: str) -> Optional[str]:
+        """
+        从继承关系中推理泛型参数的具体类型
+        例如：M -> MaterialConfigMapper, W -> MaterialConfigServiceImpl
+        """
+        try:
+            # 获取类的继承信息
+            extends_info = getattr(current_class, 'extends', '') or ''
+            
+            if not extends_info:
+                return None
+            
+            logger.debug(f"🔍 分析泛型参数 {generic_param}，继承信息: {extends_info}")
+            
+            # 解析泛型继承，如 BaseServiceImpl<MaterialConfigMapper, MaterialConfig>
+            if '<' in extends_info and '>' in extends_info:
+                # 提取泛型参数
+                start = extends_info.find('<')
+                end = extends_info.rfind('>')
+                generic_params = extends_info[start+1:end]
+                
+                # 分割泛型参数
+                params = self._parse_generic_parameters(generic_params)
+                
+                if params:
+                    # 获取父类的泛型参数定义
+                    parent_generic_params = self._get_parent_generic_parameters(extends_info)
+                    
+                    # 建立泛型参数映射
+                    generic_mapping = {}
+                    for i, parent_param in enumerate(parent_generic_params):
+                        if i < len(params):
+                            generic_mapping[parent_param] = params[i].strip()
+                    
+                    logger.debug(f"🗺️ 泛型参数映射: {generic_mapping}")
+                    
+                    # 查找目标泛型参数的具体类型
+                    if generic_param in generic_mapping:
+                        concrete_type = generic_mapping[generic_param]
+                        # 解析完整类名
+                        full_type = self._resolve_class_name_from_imports(concrete_type, current_file)
+                        return full_type or concrete_type
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"解析泛型参数类型失败 {generic_param}: {e}")
+            return None
+    
+    def _get_parent_generic_parameters(self, extends_info: str) -> List[str]:
+        """
+        获取父类的泛型参数定义
+        例如：BaseServiceImpl<M extends BaseMapper<T>, T> -> ['M', 'T']
+        """
+        try:
+            # 提取基类名
+            base_class_name = extends_info.split('<')[0].strip()
+            
+            logger.debug(f"🔍 分析基类的泛型参数: {base_class_name}")
+            
+            # 常见的泛型参数模式
+            generic_patterns = {
+                'BaseDatagridController': ['W', 'T'],  # <W extends BaseServiceImpl, T>
+                'BaseServiceImpl': ['M', 'T'],         # <M extends BaseMapper<T>, T>
+                'ServiceImpl': ['M', 'T'],             # MyBatis Plus的ServiceImpl<M, T>
+                'BaseController': ['S', 'T'],          # <S extends BaseService, T>
+                'BaseMapper': ['T'],                   # <T>
+                'BaseService': ['T'],                  # <T>
+            }
+            
+            # 查找匹配的模式
+            for pattern, params in generic_patterns.items():
+                if pattern in base_class_name:
+                    logger.debug(f"🎯 匹配到泛型模式: {pattern} -> {params}")
+                    return params
+            
+            # 如果没有匹配的模式，尝试从继承信息中解析
+            if '<' in extends_info and '>' in extends_info:
+                # 尝试从实际的泛型声明中推断参数名
+                # 例如：BaseServiceImpl<MaterialConfigMapper, MaterialConfig>
+                # 推断父类应该有两个泛型参数
+                start = extends_info.find('<')
+                end = extends_info.rfind('>')
+                generic_params = extends_info[start+1:end]
+                param_count = len([p.strip() for p in generic_params.split(',') if p.strip()])
+                
+                if param_count == 1:
+                    return ['T']
+                elif param_count == 2:
+                    return ['M', 'T']  # 最常见的模式
+                elif param_count == 3:
+                    return ['M', 'T', 'E']
+                else:
+                    return ['M', 'T']  # 默认
+            
+            # 最后的默认值
+            return ['M', 'T']
+            
+        except Exception as e:
+            logger.debug(f"获取父类泛型参数失败: {e}")
+            return ['M', 'T']  # 返回默认值
+    
+    def _resolve_generic_base_type(self, base_type: str, current_class, current_file: str) -> Optional[str]:
+        """
+        解析泛型基类的具体实现
+        例如：BaseMapper -> MaterialConfigMapper
+        """
+        try:
+            # 这种情况较少见，通常字段类型会是泛型参数而不是泛型基类
+            # 但为了完整性，提供基本实现
+            
+            if 'BaseMapper' in base_type:
+                # 尝试根据当前类名推断Mapper名
+                class_name = current_class.name
+                if class_name.endswith('ServiceImpl'):
+                    mapper_name = class_name.replace('ServiceImpl', 'Mapper')
+                    return mapper_name
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"解析泛型基类失败 {base_type}: {e}")
+            return None
+    
+    def _get_parent_classes_info(self, current_class) -> List[Dict]:
+        """获取父类信息，用于查找继承的字段"""
+        try:
+            parent_classes = []
+            extends_info = getattr(current_class, 'extends', '') or ''
+            
+            if extends_info:
+                # 提取父类名（去掉泛型参数）
+                parent_class_name = extends_info.split('<')[0].strip()
+                
+                # 在项目中查找父类
+                for java_class in self.java_classes.values():
+                    if java_class.name == parent_class_name:
+                        parent_classes.append({
+                            'name': java_class.name,
+                            'fields': [{'name': f.get('name'), 'type': f.get('type')} 
+                                     for f in java_class.fields]
+                        })
+                        break
+            
+            return parent_classes
+            
+        except Exception as e:
+            logger.debug(f"获取父类信息失败: {e}")
+            return []
+    
+    def _resolve_base_service_type_legacy(self, current_class, current_file: str) -> Optional[str]:
+        """
+        解析baseService的实际类型（遗留方法，保留作为参考）
+        现在使用通用的_resolve_generic_field_type方法
+        """
+        try:
+            # 获取类的继承信息
+            extends_info = getattr(current_class, 'extends', '') or ''
+            
+            logger.debug(f"🔍 分析baseService类型，当前类: {current_class.name}")
+            logger.debug(f"🔍 继承信息: {extends_info}")
+            
+            if not extends_info:
+                return None
+            
+            # 解析泛型继承，如 BaseDatagridController<MaterialConfigServiceImpl, MaterialConfig>
+            if '<' in extends_info and '>' in extends_info:
+                # 提取泛型参数
+                start = extends_info.find('<')
+                end = extends_info.rfind('>')
+                generic_params = extends_info[start+1:end]
+                
+                # 分割泛型参数，处理嵌套泛型
+                params = self._parse_generic_parameters(generic_params)
+                
+                if params:
+                    # 第一个泛型参数就是baseService的类型（根据BaseDatagridController<W extends BaseServiceImpl, T>）
+                    service_type = params[0].strip()
+                    
+                    # 解析完整类名（处理import）
+                    full_service_type = self._resolve_class_name_from_imports(service_type, current_file)
+                    
+                    logger.debug(f"✅ 推理出baseService类型: {service_type} -> {full_service_type}")
+                    return full_service_type or service_type
+            
+            # 如果没有泛型参数，检查是否是BaseDatagridController的直接继承
+            if 'BaseDatagridController' in extends_info:
+                logger.debug(f"⚠️ 继承BaseDatagridController但没有泛型参数: {extends_info}")
+                # 尝试从字段注解推断
+                return self._resolve_base_service_from_field(current_class)
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"解析baseService类型失败: {e}")
+            return None
+    
+    def _parse_generic_parameters(self, generic_params: str) -> List[str]:
+        """解析泛型参数，处理嵌套泛型"""
+        params = []
+        current_param = ""
+        bracket_count = 0
+        
+        for char in generic_params:
+            if char == '<':
+                bracket_count += 1
+                current_param += char
+            elif char == '>':
+                bracket_count -= 1
+                current_param += char
+            elif char == ',' and bracket_count == 0:
+                params.append(current_param.strip())
+                current_param = ""
+            else:
+                current_param += char
+        
+        if current_param.strip():
+            params.append(current_param.strip())
+        
+        return params
+    
+    def _resolve_class_name_from_imports(self, class_name: str, current_file: str) -> Optional[str]:
+        """从import语句解析类名为完整类名"""
+        if not class_name or not current_file:
+            return class_name
+        
+        # 如果已经是完整类名，直接返回
+        if '.' in class_name:
+            return class_name
+        
+        # 从import语句中查找
+        imports = self.package_imports.get(current_file, [])
+        for import_stmt in imports:
+            if import_stmt.endswith(f".{class_name}"):
+                return class_name  # 返回简单类名，因为已经通过import确认了
+        
+        # 查找同包下的类
+        current_class = self._find_class_by_file(current_file)
+        if current_class and hasattr(current_class, 'package'):
+            current_package = current_class.package
+            if current_package:
+                # 检查同包下是否有这个类
+                full_class_name = f"{current_package}.{class_name}"
+                if self._class_exists_in_project(full_class_name):
+                    return class_name  # 返回简单类名
+        
+        return class_name
+    
+    def _resolve_base_service_from_field(self, current_class) -> Optional[str]:
+        """从baseService字段的注解或类型信息推断类型"""
+        try:
+            # 查找baseService字段
+            for field in current_class.fields:
+                if field.get('name') == 'baseService':
+                    field_type = field.get('type', '')
+                    if field_type and field_type != 'W':  # W是泛型参数
+                        return field_type
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"从字段推断baseService类型失败: {e}")
+            return None
+    
+    def _class_exists_in_project(self, full_class_name: str) -> bool:
+        """检查类是否存在于项目中"""
+        for java_class in self.java_classes.values():
+            if hasattr(java_class, 'full_name') and java_class.full_name == full_class_name:
+                return True
+            # 也检查package.name格式
+            if hasattr(java_class, 'package') and hasattr(java_class, 'name'):
+                if f"{java_class.package}.{java_class.name}" == full_class_name:
+                    return True
+        return False
     
     def _find_all_implementations(self, type_name: str, method_name: str, current_file: str = None) -> List[Dict]:
         """查找类型的所有实现，处理接口、继承和多态"""

@@ -1,6 +1,17 @@
 # Java项目分析工具配置文件
 # 使用JPype调用Eclipse JDT进行精确的Java代码解析
 
+# Maven配置
+maven:
+  # Maven本地仓库路径
+  repository_path: "D:\\Program Files\\Apache\\apache-maven-repository"
+  
+  # Maven设置文件路径 (可选)
+  settings_file: ""
+  
+  # 是否启用Maven依赖分析
+  enable_dependency_analysis: true
+
 # Java环境配置
 java:
   # Java安装路径 - 请根据您的系统修改
