@@ -1,0 +1,20 @@
+# AI模块配置文件
+
+# 基础配置
+default_provider: "ollama"
+max_history_length: 50
+log_level: "INFO"
+
+# Ollama配置
+ollama:
+  base_url: "http://localhost:11434"
+  timeout: 60  # 增加超时时间
+  default_model: "qwen3-coder:30b"  # 使用30b编程专用模型
+  temperature: 0.7
+  max_tokens: 4096  # 增加最大token数，适合代码分析
+
+# 未来扩展配置（预留）
+openai: {}
+claude: {}
+rag: {}
+mcp: {}

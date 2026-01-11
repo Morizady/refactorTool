@@ -214,6 +214,246 @@ def extract_endpoint_code(endpoint_path: str, output_dir: str = "./migration_out
         import traceback
         traceback.print_exc()
 
+def ai_analyze_endpoint_code(endpoint_path: str, output_dir: str = "./migration_output", analysis_type: str = None):
+    """AI分析模式：提取特定接口调用链的Java代码并使用AI进行分析"""
+    print(f"🤖 开始AI分析接口代码: {endpoint_path}")
+    
+    # 加载提示词配置
+    from ai_prompt_manager import AIPromptManager
+    prompt_manager = AIPromptManager()
+    
+    # 如果没有指定分析类型，使用默认类型
+    if analysis_type is None:
+        analysis_type = prompt_manager.get_default_analysis_type()
+    
+    # 验证分析类型
+    if not prompt_manager.validate_analysis_type(analysis_type):
+        print(f"❌ 无效的分析类型: {analysis_type}")
+        prompt_manager.list_analysis_types()
+        return
+    
+    print(f"📋 分析类型: {analysis_type}")
+    
+    # 首先执行代码提取逻辑
+    safe_endpoint = endpoint_path.replace('/', '_').replace('{', '').replace('}', '')
+    call_tree_file = f"{output_dir}/deep_call_tree_{safe_endpoint}_jdt.md"
+    mappings_file = f"{output_dir}/method_mappings_{safe_endpoint}_jdt.json"
+    code_output_file = f"{output_dir}/java_code_{safe_endpoint}_jdt.md"
+    
+    # 检查必要文件是否存在
+    if not os.path.exists(call_tree_file):
+        print(f"❌ 调用树文件不存在: {call_tree_file}")
+        print("请先运行调用树生成：")
+        print(f"python main.py --call-tree {endpoint_path} --output {output_dir}")
+        return
+    
+    if not os.path.exists(mappings_file):
+        print(f"❌ 方法映射文件不存在: {mappings_file}")
+        print("请先运行调用树生成：")
+        print(f"python main.py --call-tree {endpoint_path} --output {output_dir}")
+        return
+    
+    # 确定项目根目录
+    project_root = _find_project_root_from_mappings(mappings_file)
+    if not project_root:
+        print("❌ 无法确定项目根目录")
+        return
+    
+    print(f"📁 项目根目录: {project_root}")
+    
+    # 使用代码提取器
+    from java_code_extractor import JavaCodeExtractor
+    extractor = JavaCodeExtractor(project_root)
+    
+    try:
+        # 提取代码
+        print("📝 正在提取Java代码...")
+        extractor.extract_code_from_call_tree(call_tree_file, mappings_file, code_output_file)
+        print(f"✅ Java代码已提取到: {code_output_file}")
+        
+        # 读取提取的代码文件
+        if not os.path.exists(code_output_file):
+            print(f"❌ 代码文件不存在: {code_output_file}")
+            return
+        
+        with open(code_output_file, 'r', encoding='utf-8') as f:
+            code_content = f.read()
+        
+        # 打印文件前20行
+        print("\n" + "="*80)
+        print("📄 代码文件前20行预览:")
+        print("="*80)
+        
+        lines = code_content.split('\n')
+        for i, line in enumerate(lines[:20], 1):
+            print(f"{i:2d}: {line}")
+        
+        if len(lines) > 20:
+            print(f"... (还有 {len(lines) - 20} 行)")
+        
+        print("="*80)
+        
+        # 初始化AI模块
+        print(f"\n🤖 正在初始化AI分析模块...")
+        try:
+            from ai_module import AIManager
+            from ai_module.providers.ollama_provider import OllamaProvider
+            
+            # 加载配置
+            from ai_module.config.settings import load_config
+            config = load_config("ai_config.yaml")
+            
+            # 创建AI管理器
+            ai_manager = AIManager()
+            
+            # 创建并注册Ollama提供者
+            ollama_provider = OllamaProvider(
+                default_model=config.ollama.default_model,
+                timeout=config.ollama.timeout,
+                base_url=config.ollama.base_url
+            )
+            if ai_manager.register_provider(ollama_provider, set_as_default=True):
+                print("✅ AI服务初始化成功")
+            else:
+                print("❌ AI服务初始化失败，请检查Ollama是否正在运行")
+                return
+            
+            # 获取提示词
+            system_prompt = prompt_manager.get_system_prompt(analysis_type)
+            user_message = prompt_manager.build_user_prompt(
+                endpoint_path=endpoint_path,
+                code_file=code_output_file,
+                code_content=code_content,
+                analysis_type=analysis_type
+            )
+            
+            if not system_prompt or not user_message:
+                print(f"❌ 无法获取分析类型 '{analysis_type}' 的提示词")
+                return
+            
+            print(f"🔍 正在进行AI代码分析 ({analysis_type})...")
+            print("⏳ 这可能需要一些时间，请稍候...")
+            
+            # 调用AI分析
+            response = ai_manager.chat(
+                message=user_message,
+                system_prompt=system_prompt,
+                use_history=False
+            )
+            
+            if response and response.content:
+                print("\n" + "="*80)
+                print(f"🤖 AI分析结果 ({analysis_type}):")
+                print("="*80)
+                print(response.content)
+                print("="*80)
+                
+                # 保存AI分析结果
+                ai_analysis_file = f"{output_dir}/ai_analysis_{safe_endpoint}_{analysis_type}.md"
+                with open(ai_analysis_file, 'w', encoding='utf-8') as f:
+                    f.write(f"# AI代码分析报告 ({analysis_type})\n\n")
+                    f.write(f"**接口路径**: {endpoint_path}\n")
+                    f.write(f"**分析类型**: {analysis_type}\n")
+                    f.write(f"**分析时间**: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"**代码文件**: {code_output_file}\n\n")
+                    f.write("## 分析结果\n\n")
+                    f.write(response.content)
+                
+                print(f"\n✅ AI分析结果已保存到: {ai_analysis_file}")
+            else:
+                print("❌ AI分析失败，未获得有效响应")
+                
+        except ImportError as e:
+            print(f"❌ AI模块导入失败: {e}")
+            print("请确保ai_module已正确安装和配置")
+        except Exception as e:
+            print(f"❌ AI分析过程中出现错误: {e}")
+            import traceback
+            traceback.print_exc()
+        
+    except Exception as e:
+        print(f"❌ 代码提取失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+def ai_chat_stream(message: str):
+    """AI对话模式：与AI进行流式对话"""
+    print(f"🤖 AI对话模式")
+    print(f"💬 用户消息: {message}")
+    print("-" * 60)
+    
+    try:
+        # 初始化AI模块
+        from ai_module import AIManager
+        from ai_module.providers.ollama_provider import OllamaProvider
+        
+        # 创建AI管理器
+        ai_manager = AIManager()
+        
+        # 加载配置
+        from ai_module.config.settings import load_config
+        config = load_config("ai_config.yaml")
+        
+        # 创建并注册Ollama提供者
+        ollama_provider = OllamaProvider(
+            default_model=config.ollama.default_model,
+            timeout=config.ollama.timeout,
+            base_url=config.ollama.base_url
+        )
+        if not ai_manager.register_provider(ollama_provider, set_as_default=True):
+            print("❌ AI服务初始化失败，请检查Ollama是否正在运行")
+            return
+        
+        print("✅ AI服务初始化成功")
+        
+        # 获取可用模型信息
+        models = ai_manager.get_available_models()
+        if models:
+            print(f"📋 使用模型: {models[0]}")
+        
+        print(f"🤖 AI回复:")
+        print("-" * 60)
+        
+        # 使用流式对话
+        stream = ai_manager.chat_stream(
+            message=message,
+            use_history=False  # 不使用历史记录，每次都是独立对话
+        )
+        
+        if stream:
+            # 实时输出流式响应
+            full_response = ""
+            try:
+                for chunk in stream:
+                    if chunk:
+                        print(chunk, end='', flush=True)  # 实时输出，不换行
+                        full_response += chunk
+                
+                print()  # 最后换行
+                print("-" * 60)
+                print(f"✅ 对话完成")
+                
+                # 显示统计信息
+                if full_response:
+                    word_count = len(full_response)
+                    char_count = len(full_response.replace(' ', ''))
+                    print(f"📊 响应统计: {word_count} 字符, {char_count} 个非空字符")
+                
+            except KeyboardInterrupt:
+                print("\n\n⚠️ 用户中断对话")
+            except Exception as e:
+                print(f"\n❌ 流式输出过程中出现错误: {e}")
+        else:
+            print("❌ 无法获取AI响应流")
+            
+    except ImportError as e:
+        print(f"❌ AI模块导入失败: {e}")
+        print("请确保ai_module已正确安装和配置")
+    except Exception as e:
+        print(f"❌ AI对话过程中出现错误: {e}")
+        import traceback
+        traceback.print_exc()
+
 def _find_project_root_from_mappings(mappings_file: str) -> str:
     """从方法映射文件中确定项目根目录"""
     try:
@@ -1414,13 +1654,21 @@ def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='Java项目接口分析工具')
     
-    # 创建互斥组：要么是迁移模式，要么是单项目模式，要么是接口查看模式，要么是调用树生成模式，要么是代码提取模式
+    # 创建互斥组：要么是迁移模式，要么是单项目模式，要么是接口查看模式，要么是调用树生成模式，要么是代码提取模式，要么是AI分析模式，要么是AI对话模式
     mode_group = parser.add_mutually_exclusive_group(required=True)
     mode_group.add_argument('--migrate', action='store_true', help='迁移模式：分析新旧两个项目')
     mode_group.add_argument('--single', metavar='PROJECT_PATH', help='单项目模式：只分析一个项目')
     mode_group.add_argument('--show-endpoint', metavar='ENDPOINT_PATH', help='显示特定接口的代码和调用链，如：/admin/category/page')
     mode_group.add_argument('--call-tree', metavar='ENDPOINT_PATH', help='生成特定接口的深度调用链树，如：/user/user/login')
     mode_group.add_argument('--extract-code', metavar='ENDPOINT_PATH', help='提取特定接口调用链的Java代码，如：/materialConfig/getlist')
+    mode_group.add_argument('--ai-analyze', metavar='ENDPOINT_PATH', help='AI分析模式：提取接口代码并使用AI进行分析，如：/materialConfig/getlist')
+    mode_group.add_argument('--ai-chat', metavar='MESSAGE', help='AI对话模式：与AI进行流式对话，如：python main.py --ai-chat "你好"')
+    
+    # AI分析类型参数
+    parser.add_argument('--analysis-type', 
+                       choices=['business_logic', 'technical_analysis', 'security_analysis', 'performance_analysis'],
+                       default='business_logic',
+                       help='AI分析类型 (默认: business_logic)')
     
     # 调用链分析参数
     parser.add_argument('--max-depth', type=int, default=6, 
@@ -1472,9 +1720,17 @@ def main():
         # 直接调用调用树生成功能
         generate_call_tree(args.call_tree, args.output, args.max_depth)
         return
-    else:  # 代码提取模式
+    elif args.extract_code:  # 代码提取模式
         # 直接调用代码提取功能
         extract_endpoint_code(args.extract_code, args.output)
+        return
+    elif args.ai_analyze:  # AI分析模式
+        # 直接调用AI分析功能
+        ai_analyze_endpoint_code(args.ai_analyze, args.output, args.analysis_type)
+        return
+    else:  # AI对话模式
+        # 直接调用AI对话功能
+        ai_chat_stream(args.ai_chat)
         return
     
     # 运行工具
