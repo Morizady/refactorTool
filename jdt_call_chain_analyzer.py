@@ -642,6 +642,83 @@ class JDTDeepCallChainAnalyzer:
         
         # 处理静态方法调用或实例方法调用
         if object_name:
+            # 特殊处理 this 调用
+            if object_name == "this":
+                current_class = self._find_class_by_file(current_file)
+                if current_class:
+                    # 检查方法是否在当前类中
+                    method_found_in_current_class = False
+                    for method in current_class.methods:
+                        if method.name == method_name:
+                            method_found_in_current_class = True
+                            break
+                    
+                    if method_found_in_current_class:
+                        # 方法在当前类中，创建直接调用节点
+                        node = CallTreeNode(
+                            method_name=method_name,
+                            class_name=current_class.name,
+                            package_name=current_class.package,
+                            file_path=current_file,
+                            line_number=line_number,
+                            call_type="direct",
+                            parameters=[f"arg{i}" for i in range(arguments)],
+                            return_type="",
+                            children=[],
+                            method_mappings=[],
+                            depth=depth
+                        )
+                        nodes.append(node)
+                        return nodes
+                    else:
+                        # 方法不在当前类中，检查父类
+                        parent_method = self._find_method_in_parent_classes(method_name, current_class)
+                        if parent_method:
+                            # 方法在父类中，创建继承调用节点
+                            node = CallTreeNode(
+                                method_name=method_name,
+                                class_name=parent_method["class"],
+                                package_name=parent_method["package"],
+                                file_path=parent_method["file"],
+                                line_number=line_number,
+                                call_type="inheritance",
+                                parameters=[f"arg{i}" for i in range(arguments)],
+                                return_type="",
+                                children=[],
+                                method_mappings=[],
+                                depth=depth
+                            )
+                            nodes.append(node)
+                            return nodes
+                        else:
+                            # 如果在父类中也没找到，可能是外部框架类的方法
+                            # 对于this.method()调用，如果找不到定义，假设是从父类继承的
+                            logger.info(f"🔍 this.{method_name}() 未在当前类或已知父类中找到，假设为继承方法")
+                            
+                            # 尝试从类继承关系中获取父类信息
+                            parent_class_name = getattr(current_class, 'extends', '') or ''
+                            if parent_class_name:
+                                # 去掉泛型参数
+                                parent_class_name = parent_class_name.split('<')[0].strip()
+                                
+                                logger.info(f"✅ 创建继承节点: {parent_class_name}.{method_name}()")
+                                
+                                node = CallTreeNode(
+                                    method_name=method_name,
+                                    class_name=parent_class_name,
+                                    package_name="",  # 外部类包名未知
+                                    file_path="",
+                                    line_number=line_number,
+                                    call_type="inheritance",
+                                    parameters=[f"arg{i}" for i in range(arguments)],
+                                    return_type="",
+                                    children=[],
+                                    method_mappings=[],
+                                    depth=depth
+                                )
+                                nodes.append(node)
+                                return nodes
+            
             # 处理链式调用，如 StatusCode.CODE_1000.getKey()
             # 提取基础类名（第一个点之前的部分）
             base_class_name = object_name.split('.')[0] if '.' in object_name else object_name
@@ -664,9 +741,95 @@ class JDTDeepCallChainAnalyzer:
                 nodes.append(node)
                 return nodes
             
-            # 检查是否是this.field的调用
+            # 检查是否是this.field的调用或this.method()的调用
             if object_name.startswith("this."):
                 field_name = object_name[5:]  # 去掉"this."
+                
+                logger.info(f"🔍 处理this.调用: {object_name}.{method_name}(), field_name={field_name}")
+                
+                # 首先检查是否是this.method()的直接调用
+                current_class = self._find_class_by_file(current_file)
+                if current_class:
+                    logger.info(f"🔍 当前类: {current_class.name}, 查找方法: {method_name}")
+                    
+                    # 检查方法是否在当前类中
+                    method_found_in_current_class = False
+                    for method in current_class.methods:
+                        if method.name == method_name:
+                            method_found_in_current_class = True
+                            break
+                    
+                    logger.info(f"🔍 方法在当前类中: {method_found_in_current_class}")
+                    
+                    if method_found_in_current_class:
+                        # 这是this.method()的直接调用
+                        node = CallTreeNode(
+                            method_name=method_name,
+                            class_name=current_class.name,
+                            package_name=current_class.package,
+                            file_path=current_file,
+                            line_number=line_number,
+                            call_type="direct",
+                            parameters=[f"arg{i}" for i in range(arguments)],
+                            return_type="",
+                            children=[],
+                            method_mappings=[],
+                            depth=depth
+                        )
+                        nodes.append(node)
+                        return nodes
+                    else:
+                        # 方法不在当前类中，检查父类
+                        logger.info(f"🔍 在父类中查找方法: {method_name}")
+                        parent_method = self._find_method_in_parent_classes(method_name, current_class)
+                        if parent_method:
+                            logger.info(f"✅ 在父类中找到方法: {parent_method}")
+                            # 这是this.method()的继承调用
+                            node = CallTreeNode(
+                                method_name=method_name,
+                                class_name=parent_method["class"],
+                                package_name=parent_method["package"],
+                                file_path=parent_method["file"],
+                                line_number=line_number,
+                                call_type="inheritance",
+                                parameters=[f"arg{i}" for i in range(arguments)],
+                                return_type="",
+                                children=[],
+                                method_mappings=[],
+                                depth=depth
+                            )
+                            nodes.append(node)
+                            return nodes
+                        else:
+                            # 如果在父类中也没找到，可能是外部框架类的方法
+                            # 对于this.method()调用，如果找不到定义，假设是从父类继承的
+                            logger.info(f"🔍 this.{method_name}() 未在当前类或已知父类中找到，假设为继承方法")
+                            
+                            # 尝试从类继承关系中获取父类信息
+                            parent_class_name = getattr(current_class, 'extends', '') or ''
+                            if parent_class_name:
+                                # 去掉泛型参数
+                                parent_class_name = parent_class_name.split('<')[0].strip()
+                                
+                                logger.info(f"✅ 创建继承节点: {parent_class_name}.{method_name}()")
+                                
+                                node = CallTreeNode(
+                                    method_name=method_name,
+                                    class_name=parent_class_name,
+                                    package_name="",  # 外部类包名未知
+                                    file_path="",
+                                    line_number=line_number,
+                                    call_type="inheritance",
+                                    parameters=[f"arg{i}" for i in range(arguments)],
+                                    return_type="",
+                                    children=[],
+                                    method_mappings=[],
+                                    depth=depth
+                                )
+                                nodes.append(node)
+                                return nodes
+                
+                # 如果不是this.method()，则按原来的逻辑处理this.field.method()
                 # 解析this.field的实际类型
                 variable_type = self._resolve_variable_type(field_name, current_file)
                 
@@ -825,20 +988,64 @@ class JDTDeepCallChainAnalyzer:
                 # 2. 同类中的方法
                 current_class = self._find_class_by_file(current_file)
                 if current_class:
-                    node = CallTreeNode(
-                        method_name=method_name,
-                        class_name=current_class.name,
-                        package_name=current_class.package,
-                        file_path=current_file,
-                        line_number=line_number,
-                        call_type="direct",
-                        parameters=[f"arg{i}" for i in range(arguments)],
-                        return_type="",
-                        children=[],
-                        method_mappings=[],
-                        depth=depth
-                    )
-                    nodes.append(node)
+                    # 首先检查方法是否在当前类中
+                    method_found_in_current_class = False
+                    for method in current_class.methods:
+                        if method.name == method_name:
+                            method_found_in_current_class = True
+                            break
+                    
+                    if method_found_in_current_class:
+                        # 方法在当前类中，创建直接调用节点
+                        node = CallTreeNode(
+                            method_name=method_name,
+                            class_name=current_class.name,
+                            package_name=current_class.package,
+                            file_path=current_file,
+                            line_number=line_number,
+                            call_type="direct",
+                            parameters=[f"arg{i}" for i in range(arguments)],
+                            return_type="",
+                            children=[],
+                            method_mappings=[],
+                            depth=depth
+                        )
+                        nodes.append(node)
+                    else:
+                        # 方法不在当前类中，检查父类
+                        parent_method = self._find_method_in_parent_classes(method_name, current_class)
+                        if parent_method:
+                            # 方法在父类中，创建继承调用节点
+                            node = CallTreeNode(
+                                method_name=method_name,
+                                class_name=parent_method["class"],
+                                package_name=parent_method["package"],
+                                file_path=parent_method["file"],
+                                line_number=line_number,
+                                call_type="inheritance",
+                                parameters=[f"arg{i}" for i in range(arguments)],
+                                return_type="",
+                                children=[],
+                                method_mappings=[],
+                                depth=depth
+                            )
+                            nodes.append(node)
+                        else:
+                            # 方法既不在当前类也不在父类中，可能是外部方法，仍然创建直接调用节点
+                            node = CallTreeNode(
+                                method_name=method_name,
+                                class_name=current_class.name,
+                                package_name=current_class.package,
+                                file_path=current_file,
+                                line_number=line_number,
+                                call_type="direct",
+                                parameters=[f"arg{i}" for i in range(arguments)],
+                                return_type="",
+                                children=[],
+                                method_mappings=[],
+                                depth=depth
+                            )
+                            nodes.append(node)
         
         return nodes
     
@@ -1297,6 +1504,16 @@ class JDTDeepCallChainAnalyzer:
                 "file": java_class.file_path,
                 "call_type": "concrete"
             })
+        elif java_class:
+            # 如果在当前类中没找到方法，检查父类
+            parent_method = self._find_method_in_parent_classes(method_name, java_class)
+            if parent_method:
+                implementations.append({
+                    "class": parent_method["class"],
+                    "package": parent_method["package"],
+                    "file": parent_method["file"],
+                    "call_type": "inheritance"
+                })
         
         # 如果找到了明确的import但类不在项目中，不应该继续查找
         if current_file and current_file in self.package_imports:
@@ -2123,15 +2340,28 @@ class JDTDeepCallChainAnalyzer:
         if call_type == "direct":
             current_class = self._find_class_by_file(current_file)
             if current_class:
+                # 首先在当前类中查找
                 for method in current_class.methods:
                     if method.name == method_name:
                         implementations.append({
                             "file": current_file,
                             "class": current_class.name,
                             "package": current_class.package,
-                            "type": "local"
+                            "type": "local",
+                            "call_type": "direct"
                         })
                         break
+                else:
+                    # 如果在当前类中没找到，检查父类
+                    parent_method = self._find_method_in_parent_classes(method_name, current_class)
+                    if parent_method:
+                        implementations.append({
+                            "file": parent_method["file"],
+                            "class": parent_method["class"],
+                            "package": parent_method["package"],
+                            "type": "inheritance",
+                            "call_type": "inheritance"
+                        })
         
         return implementations
     
@@ -2195,6 +2425,59 @@ class JDTDeepCallChainAnalyzer:
             'StringBuffer', 'Collections', 'Arrays', 'Optional', 'Stream'
         }
         return class_name in standard_classes
+    
+    def _find_method_in_parent_classes(self, method_name: str, current_class: JavaClass) -> Optional[Dict]:
+        """在父类中查找方法"""
+        try:
+            # 获取父类信息
+            extends_info = getattr(current_class, 'extends', '') or ''
+            
+            if not extends_info:
+                return None
+            
+            # 提取父类名（去掉泛型参数）
+            parent_class_name = extends_info.split('<')[0].strip()
+            
+            logger.debug(f"🔍 在父类中查找方法: {method_name}，父类: {parent_class_name}")
+            
+            # 在项目中查找父类
+            parent_class = None
+            for java_class in self.java_classes.values():
+                if java_class.name == parent_class_name:
+                    parent_class = java_class
+                    break
+            
+            if not parent_class:
+                # 如果在项目中没找到父类，可能是外部类（如BaseDatagridController）
+                logger.debug(f"🔍 父类 {parent_class_name} 不在项目中，可能是外部框架类")
+                return {
+                    "file": "",
+                    "class": parent_class_name,
+                    "package": "",
+                    "method": method_name
+                }
+            
+            # 在父类中查找方法
+            for method in parent_class.methods:
+                if method.name == method_name:
+                    logger.debug(f"✅ 在父类 {parent_class_name} 中找到方法: {method_name}")
+                    return {
+                        "file": parent_class.file_path,
+                        "class": parent_class.name,
+                        "package": parent_class.package,
+                        "method": method_name
+                    }
+            
+            # 如果在直接父类中没找到，递归查找祖父类
+            grandparent_method = self._find_method_in_parent_classes(method_name, parent_class)
+            if grandparent_method:
+                return grandparent_method
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"查找父类方法失败: {e}")
+            return None
     
     def get_class_hierarchy(self) -> Dict[str, Dict]:
         """获取类继承关系"""
