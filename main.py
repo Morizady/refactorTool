@@ -170,6 +170,88 @@ def _generate_jdt_call_tree(endpoint_data: Dict, output_dir: str, max_depth: int
         import traceback
         traceback.print_exc()
 
+def extract_endpoint_code(endpoint_path: str, output_dir: str = "./migration_output"):
+    """提取特定接口调用链的Java代码"""
+    print(f"🚀 开始提取接口代码: {endpoint_path}")
+    
+    # 查找对应的调用树和方法映射文件
+    safe_endpoint = endpoint_path.replace('/', '_').replace('{', '').replace('}', '')
+    call_tree_file = f"{output_dir}/deep_call_tree_{safe_endpoint}_jdt.md"
+    mappings_file = f"{output_dir}/method_mappings_{safe_endpoint}_jdt.json"
+    
+    if not os.path.exists(call_tree_file):
+        print(f"❌ 调用树文件不存在: {call_tree_file}")
+        print("请先运行调用树生成：")
+        print(f"python main.py --call-tree {endpoint_path} --output {output_dir}")
+        return
+    
+    if not os.path.exists(mappings_file):
+        print(f"❌ 方法映射文件不存在: {mappings_file}")
+        print("请先运行调用树生成：")
+        print(f"python main.py --call-tree {endpoint_path} --output {output_dir}")
+        return
+    
+    # 确定项目根目录
+    project_root = _find_project_root_from_mappings(mappings_file)
+    if not project_root:
+        print("❌ 无法确定项目根目录")
+        return
+    
+    print(f"📁 项目根目录: {project_root}")
+    
+    # 使用代码提取器
+    from java_code_extractor import JavaCodeExtractor
+    extractor = JavaCodeExtractor(project_root)
+    
+    # 生成输出文件
+    code_output_file = f"{output_dir}/java_code_{safe_endpoint}_jdt.md"
+    
+    try:
+        extractor.extract_code_from_call_tree(call_tree_file, mappings_file, code_output_file)
+        print(f"✅ Java代码已提取到: {code_output_file}")
+    except Exception as e:
+        print(f"❌ 代码提取失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+def _find_project_root_from_mappings(mappings_file: str) -> str:
+    """从方法映射文件中确定项目根目录"""
+    try:
+        with open(mappings_file, 'r', encoding='utf-8') as f:
+            mappings = json.load(f)
+        
+        if not mappings:
+            return None
+        
+        # 取第一个映射的文件路径
+        first_mapping = mappings[0]
+        file_path = first_mapping.get('file_path', '')
+        
+        if not file_path:
+            return None
+        
+        # 转换路径分隔符
+        file_path = file_path.replace('\\', os.sep)
+        
+        # 查找项目根目录
+        path_parts = file_path.split(os.sep)
+        for i, part in enumerate(path_parts):
+            if part == 'src':
+                # 找到src目录，项目根目录就是src的上一级
+                return os.sep.join(path_parts[:i])
+        
+        # 如果没找到src目录，尝试其他方式
+        for i, part in enumerate(path_parts):
+            if part in ['main', 'java']:
+                return os.sep.join(path_parts[:max(0, i-2)])
+        
+        # 最后的备选方案
+        return os.path.dirname(os.path.dirname(file_path))
+        
+    except Exception as e:
+        print(f"解析映射文件失败: {e}")
+        return None
+
 def show_endpoint_details(endpoint_path: str, output_dir: str = "./migration_output"):
     """显示特定接口的代码和调用链"""
     analysis_file = f"{output_dir}/endpoint_analysis.json"
@@ -1332,12 +1414,13 @@ def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='Java项目接口分析工具')
     
-    # 创建互斥组：要么是迁移模式，要么是单项目模式，要么是接口查看模式，要么是调用树生成模式
+    # 创建互斥组：要么是迁移模式，要么是单项目模式，要么是接口查看模式，要么是调用树生成模式，要么是代码提取模式
     mode_group = parser.add_mutually_exclusive_group(required=True)
     mode_group.add_argument('--migrate', action='store_true', help='迁移模式：分析新旧两个项目')
     mode_group.add_argument('--single', metavar='PROJECT_PATH', help='单项目模式：只分析一个项目')
     mode_group.add_argument('--show-endpoint', metavar='ENDPOINT_PATH', help='显示特定接口的代码和调用链，如：/admin/category/page')
     mode_group.add_argument('--call-tree', metavar='ENDPOINT_PATH', help='生成特定接口的深度调用链树，如：/user/user/login')
+    mode_group.add_argument('--extract-code', metavar='ENDPOINT_PATH', help='提取特定接口调用链的Java代码，如：/materialConfig/getlist')
     
     # 调用链分析参数
     parser.add_argument('--max-depth', type=int, default=6, 
@@ -1385,9 +1468,13 @@ def main():
         # 直接调用接口查看功能，不需要创建MigrationTool
         show_endpoint_details(args.show_endpoint, args.output)
         return
-    else:  # 调用树生成模式
+    elif args.call_tree:  # 调用树生成模式
         # 直接调用调用树生成功能
         generate_call_tree(args.call_tree, args.output, args.max_depth)
+        return
+    else:  # 代码提取模式
+        # 直接调用代码提取功能
+        extract_endpoint_code(args.extract_code, args.output)
         return
     
     # 运行工具

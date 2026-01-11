@@ -36,3 +36,10 @@ split
 size
 Anti.execute
 SqlUtil.checkInject
+newArrayList
+ArrayList
+ServiceResult.<init>
+RspResult.<init>
+isNullOrEmpty
+setSTATUS
+setMSG

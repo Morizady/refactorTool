@@ -1,0 +1,131 @@
+{
+  "framework_methods": {
+    "MyBatis-Plus": {
+      "ServiceImpl": [
+        {
+          "method_name": "insertOrUpdate",
+          "class_name": "ServiceImpl",
+          "package": "com.baomidou.mybatisplus.service.impl",
+          "description": "插入或更新实体，根据主键判断执行插入或更新操作",
+          "parameters": ["entity"],
+          "return_type": "boolean",
+          "framework": "MyBatis-Plus",
+          "version": "3.x",
+          "is_inherited": false,
+          "parent_class": ""
+        },
+        {
+          "method_name": "selectById",
+          "class_name": "ServiceImpl",
+          "package": "com.baomidou.mybatisplus.service.impl",
+          "description": "根据主键ID查询实体",
+          "parameters": ["id"],
+          "return_type": "T",
+          "framework": "MyBatis-Plus",
+          "version": "3.x",
+          "is_inherited": false,
+          "parent_class": ""
+        },
+        {
+          "method_name": "selectList",
+          "class_name": "ServiceImpl",
+          "package": "com.baomidou.mybatisplus.service.impl",
+          "description": "根据条件查询实体列表",
+          "parameters": ["wrapper"],
+          "return_type": "List<T>",
+          "framework": "MyBatis-Plus",
+          "version": "3.x",
+          "is_inherited": false,
+          "parent_class": ""
+        },
+        {
+          "method_name": "insert",
+          "class_name": "ServiceImpl",
+          "package": "com.baomidou.mybatisplus.service.impl",
+          "description": "插入实体",
+          "parameters": ["entity"],
+          "return_type": "boolean",
+          "framework": "MyBatis-Plus",
+          "version": "3.x",
+          "is_inherited": false,
+          "parent_class": ""
+        },
+        {
+          "method_name": "updateById",
+          "class_name": "ServiceImpl",
+          "package": "com.baomidou.mybatisplus.service.impl",
+          "description": "根据主键更新实体",
+          "parameters": ["entity"],
+          "return_type": "boolean",
+          "framework": "MyBatis-Plus",
+          "version": "3.x",
+          "is_inherited": false,
+          "parent_class": ""
+        },
+        {
+          "method_name": "deleteById",
+          "class_name": "ServiceImpl",
+          "package": "com.baomidou.mybatisplus.service.impl",
+          "description": "根据主键删除实体",
+          "parameters": ["id"],
+          "return_type": "boolean",
+          "framework": "MyBatis-Plus",
+          "version": "3.x",
+          "is_inherited": false,
+          "parent_class": ""
+        }
+      ],
+      "BaseMapper": [
+        {
+          "method_name": "selectById",
+          "class_name": "BaseMapper",
+          "package": "com.baomidou.mybatisplus.core.mapper",
+          "description": "根据主键查询",
+          "parameters": ["id"],
+          "return_type": "T",
+          "framework": "MyBatis-Plus",
+          "version": "3.x",
+          "is_inherited": false,
+          "parent_class": ""
+        },
+        {
+          "method_name": "insert",
+          "class_name": "BaseMapper",
+          "package": "com.baomidou.mybatisplus.core.mapper",
+          "description": "插入记录",
+          "parameters": ["entity"],
+          "return_type": "int",
+          "framework": "MyBatis-Plus",
+          "version": "3.x",
+          "is_inherited": false,
+          "parent_class": ""
+        }
+      ]
+    },
+    "Spring": {
+      "ApplicationContext": [
+        {
+          "method_name": "getBean",
+          "class_name": "ApplicationContext",
+          "package": "org.springframework.context",
+          "description": "从Spring容器获取Bean实例",
+          "parameters": ["name"],
+          "return_type": "Object",
+          "framework": "Spring",
+          "version": "5.x",
+          "is_inherited": false,
+          "parent_class": ""
+        }
+      ]
+    }
+  },
+  "inheritance_chains": {
+    "BaseServiceImpl": "ServiceImpl",
+    "MaterialConfigServiceImpl": "BaseServiceImpl",
+    "BaseDatagridController": "BaseController"
+  },
+  "interface_implementations": {
+    "IService": ["ServiceImpl"],
+    "BaseMapper": ["MaterialConfigMapper"]
+  }
+}
